@@ -34,9 +34,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: aaronphifer/variaq
-          # VariaQ 0.2.0 release commit. Replace with v0.2.0 if/when the
-          # upstream repository publishes that tag.
-          ref: d97fba07dd7ee4306154873d57cd36082e0d1cc9
+          # Immutable release tag for the verified VariaQ 0.2.x integration.
+          ref: v0.2.0
           path: .variaq-source
       - uses: actions/setup-node@v4
         with:
