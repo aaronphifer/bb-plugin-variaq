@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import {
+  type EnvelopeStatus,
+  type ParsedEnvelope,
+  type StructuredError,
+  type StructuredWarning,
+  SUPPORTED_SCHEMA_VERSION,
+  SUPPORTED_VARIAQ_SERIES,
+  VERIFIED_VARIAQ_VERSION,
+  validateEnvelope,
+} from "./schema.js";
 
 /**
  * Configuration for reaching the standalone VariaQ install.
@@ -58,9 +68,6 @@ export interface ResolvedConfig {
 }
 
 const OUTPUT_CAP_BYTES = 900_000; // below PLUGIN_CLI_OUTPUT_MAX_BYTES (1 MiB)
-
-export const VERIFIED_VARIAQ_VERSION = "0.2.0";
-export const SUPPORTED_VARIAQ_SERIES = "0.2.x";
 
 // Well-known locations probed, in order, when the user has not configured
 // anything. The first VariaQ checkout with a usable venv wins.
@@ -333,11 +340,73 @@ export async function runVariaq(
   });
 }
 
+export interface JsonResult {
+  envelope: ParsedEnvelope;
+  code: number;
+  timedOut: boolean;
+}
+
 /**
- * Run VariaQ and throw PluginError with the CLI's own error text on non-zero
- * exit. VariaQ 0.2.0 conventions (verified live):
- *   exit 0 success · exit 1 solver failure (run persisted) · exit 2 usage/lookup.
+ * Run VariaQ expecting a schema-v1 JSON envelope on stdout.
+ *
+ * - On timeout: throws PluginError.
+ * - On invalid/unsupported schema: throws PluginError.
+ * - On non-zero exit: returns a JsonResult instead of throwing so callers can
+ *   preserve VariaQ's structured failure (run id, status, warnings, error).
  */
+export async function runVariaqJson(
+  c: ResolvedConfig,
+  args: string[],
+  opts: { timeoutMs?: number } = {},
+): Promise<JsonResult> {
+  const jsonArgs = [...args, "--json"];
+  const result = await runVariaq(c, jsonArgs, opts);
+
+  if (result.timedOut) {
+    throw new PluginError(
+      `VariaQ timed out after ${Math.round((opts.timeoutMs ?? c.timeoutMs) / 1000)}s.`,
+      "Increase the variaq.timeoutMs plugin setting or use a smaller problem.",
+    );
+  }
+
+  let envelope: ParsedEnvelope;
+  try {
+    envelope = validateEnvelope(result.stdout);
+  } catch (err) {
+    throw new PluginError(
+      `VariaQ structured output error: ${err instanceof Error ? err.message : String(err)}`,
+      `Command: variaq ${args.join(" ")} --json. Exit code: ${result.code}. ` +
+        `stderr: ${result.stderr.trim() || "(empty)"}`,
+      result.code,
+    );
+  }
+
+  return { envelope, code: result.code, timedOut: false };
+}
+
+/**
+ * Throw a PluginError for a non-zero JsonResult.
+ * Callers that want to preserve structured failures should inspect the result
+ * directly instead of calling this helper.
+ */
+export function requireSuccess(result: JsonResult, args: string[]): ParsedEnvelope {
+  if (result.code !== 0) {
+    const { envelope, code } = result;
+    const errorDetail = envelope.error
+      ? `${envelope.error.type}: ${envelope.error.message}`
+      : `exit code ${code}`;
+    throw new PluginError(
+      `variaq ${args.join(" ")} failed: ${errorDetail}`,
+      envelope.error?.run_id !== undefined
+        ? `Run id: ${envelope.error.run_id}`
+        : undefined,
+      code,
+    );
+  }
+  return result.envelope;
+}
+
+/** Legacy wrapper used only by --version, which VariaQ does not emit as JSON. */
 export async function runVariaqStrict(
   c: ResolvedConfig,
   args: string[],
@@ -355,6 +424,26 @@ export async function runVariaqStrict(
     throw new PluginError(`variaq ${args.join(" ")} failed: ${detail}`, undefined, result.code);
   }
   return result;
+}
+
+/**
+ * Build an integration error describing malformed/unsupported JSON output.
+ * Public so tests can assert the exact shape.
+ */
+export function integrationError(
+  command: string,
+  exitCode: number,
+  stdout: string,
+  stderr: string,
+  cause: string,
+): PluginError {
+  return new PluginError(
+    `VariaQ structured output error: ${cause}`,
+    `Command: variaq ${command} --json. Exit code: ${exitCode}. ` +
+      `stdout (first 800 chars): ${stdout.slice(0, 800)}. ` +
+      `stderr (first 800 chars): ${stderr.slice(0, 800)}.`,
+    exitCode,
+  );
 }
 
 /** Run a short Python snippet inside the VariaQ environment. */
@@ -408,50 +497,53 @@ export async function runPython(
 }
 
 /**
- * Probe the resolved VariaQ environment for capability information without
- * running any circuit. Emits one JSON line from the probe script.
+ * VariaQ 0.3.0 capabilities --json data shape. We only model the pieces the
+ * plugin reads; everything else is forwarded as unknown.
  */
-export async function probeCapabilities(c: ResolvedConfig): Promise<Record<string, unknown>> {
-  const script = [
-    "import importlib.metadata, importlib.util, json, shutil, subprocess",
-    "out = {}",
-    'spec = importlib.util.find_spec("variaq")',
-    "out['variaq_installed'] = spec is not None",
-    "try:",
-    "    out['variaq_version'] = importlib.metadata.version('variaq')",
-    "except Exception:",
-    "    out['variaq_version'] = None",
-    'out["qiskit_installed"] = importlib.util.find_spec("qiskit") is not None',
-    'out["cudaq_installed"] = importlib.util.find_spec("cudaq") is not None',
-    "try:",
-    "    import cudaq as _c",
-    "    out['cudaq_version'] = importlib.metadata.version('cudaq')",
-    "    out['qpp_cpu_target'] = bool(_c.has_target('qpp-cpu'))",
-    "    out['nvidia_target'] = bool(_c.has_target('nvidia'))",
-    "    out['gpu_count'] = int(_c.num_available_gpus())",
-    "except Exception:",
-    "    out['cudaq_version'] = None",
-    "    out['qpp_cpu_target'] = False",
-    "    out['nvidia_target'] = False",
-    "    out['gpu_count'] = 0",
-    "try:",
-    "    smi = shutil.which('nvidia-smi')",
-    "    out['nvidia_driver_usable'] = bool(smi) and subprocess.run([smi, '-L'], capture_output=True, timeout=5).returncode == 0",
-    "except Exception:",
-    "    out['nvidia_driver_usable'] = False",
-    "print(json.dumps(out))",
-  ].join("\n");
-  const result = await runPython(c, script, { timeoutMs: 30_000 });
-  if (result.timedOut) throw new PluginError("Capability probe timed out.");
-  const line = result.stdout.trim().split("\n").pop() ?? "";
-  try {
-    return JSON.parse(line) as Record<string, unknown>;
-  } catch {
+export interface CapabilitiesData {
+  variaq: {
+    version: string;
+    output_schema_version: string;
+    python_version?: string;
+    python_implementation?: string;
+  };
+  problem_families?: Array<{ name: string; supported?: boolean }>;
+  solvers?: Array<{
+    name: string;
+    supported?: boolean;
+    installed?: boolean;
+    available?: boolean;
+    reason?: string | null;
+  }>;
+  frameworks?: Array<{
+    name: string;
+    version?: string | null;
+    installed?: boolean;
+    targets?: Record<string, unknown>;
+  }>;
+  physical_qpu?: {
+    supported?: boolean;
+    installed?: boolean;
+    available?: boolean;
+    reason?: string;
+  };
+  warnings?: unknown[];
+}
+
+/**
+ * Fetch VariaQ's own capabilities via `variaq capabilities --json`.
+ * This is the authoritative source of solver/framework availability.
+ */
+export async function probeCapabilities(c: ResolvedConfig): Promise<CapabilitiesData> {
+  const result = await runVariaqJson(c, ["capabilities"], { timeoutMs: 30_000 });
+  const envelope = requireSuccess(result, ["capabilities"]);
+  if (envelope.status !== "success" || typeof envelope.data !== "object" || envelope.data === null) {
     throw new PluginError(
-      "Could not read VariaQ capability probe output.",
-      result.stderr.trim() || "The configured python may not have VariaQ installed correctly.",
+      "VariaQ capabilities returned an invalid result.",
+      `status=${envelope.status}; data=${JSON.stringify(envelope.data).slice(0, 200)}`,
     );
   }
+  return envelope.data as CapabilitiesData;
 }
 
 /** Parse stdout as JSON with a PluginError on malformed output. */
@@ -472,43 +564,270 @@ export interface VariaqVersionCompatibility {
   supportedSeries: typeof SUPPORTED_VARIAQ_SERIES;
   verifiedVersion: typeof VERIFIED_VARIAQ_VERSION;
   warning: string | null;
+  schemaVersion?: string;
+  schemaVersionSupported: boolean;
 }
 
 /**
- * The 0.1.0 adapter is verified against VariaQ 0.2.0 and accepts harmless
- * patch updates in the 0.2 series. Other CLI grammars are reported, not
- * blocked, so status/version still help diagnose a mismatched environment.
+ * bb-plugin-variaq 0.2.0 is verified against VariaQ 0.3.0 / schema_version 1.
+ * Patch releases in the 0.3 series are accepted. Other series are reported as
+ * unsupported so users can still inspect a mismatched environment.
  */
-export function checkVariaqVersion(raw: string | null): VariaqVersionCompatibility {
+export function checkVariaqVersion(raw: string | null, schemaVersion?: string): VariaqVersionCompatibility {
   const match = raw?.match(/(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\b|$)/);
   const version = match ? `${match[1]}.${match[2]}.${match[3]}` : null;
-  const supported = match?.[1] === "0" && match?.[2] === "2";
+  const supported = match?.[1] === "0" && match?.[2] === "3";
+  const schemaVersionSupported = schemaVersion === undefined || schemaVersion === SUPPORTED_SCHEMA_VERSION;
+
+  const parts: string[] = [];
+  if (!supported) {
+    parts.push(
+      `Unsupported VariaQ version ${version ?? "unknown"}; bb-plugin-variaq 0.2.0 is verified with VariaQ ${VERIFIED_VARIAQ_VERSION} and supports ${SUPPORTED_VARIAQ_SERIES}.`,
+    );
+  }
+  if (!schemaVersionSupported) {
+    parts.push(
+      `Unsupported VariaQ output schema_version ${schemaVersion}; this plugin supports schema_version ${SUPPORTED_SCHEMA_VERSION}.`,
+    );
+  }
+
   return {
     version,
     supported,
     supportedSeries: SUPPORTED_VARIAQ_SERIES,
     verifiedVersion: VERIFIED_VARIAQ_VERSION,
-    warning: supported
-      ? null
-      : `Unsupported VariaQ version ${version ?? "unknown"}; bb-plugin-variaq 0.1.0 is verified with ${VERIFIED_VARIAQ_VERSION} and supports ${SUPPORTED_VARIAQ_SERIES}.`,
+    warning: parts.length > 0 ? parts.join(" ") : null,
+    schemaVersion,
+    schemaVersionSupported,
   };
 }
 
-/** Extract all stable `run-<uuid>` tokens, independent of surrounding prose. */
-export function extractRunIds(stdout: string): string[] {
-  const matches = stdout.match(
-    /\brun-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+/**
+ * Map a solver capability entry to a simple "available" / "unavailable" status.
+ * A solver is available only when VariaQ says it is supported, installed,
+ * and available on this host.
+ */
+function solverAvailability(
+  solver: NonNullable<CapabilitiesData["solvers"]>[number],
+): "available" | "unavailable" {
+  if (solver.supported && solver.installed && solver.available) return "available";
+  return "unavailable";
+}
+
+/**
+ * Combine VariaQ's authoritative capabilities with plugin-side resolved
+ * configuration into the status tool result.
+ */
+export async function statusFromCapabilities(
+  c: ResolvedConfig,
+  cap: CapabilitiesData,
+): Promise<Record<string, unknown>> {
+  const version = cap.variaq?.version ?? null;
+  const schemaVersion = cap.variaq?.output_schema_version;
+  const compatibility = checkVariaqVersion(version, schemaVersion);
+
+  const solverMap = new Map(
+    (cap.solvers ?? []).map((s) => [s.name, solverAvailability(s)] as const),
   );
-  return [...new Set(matches ?? [])];
+  const solvers: Record<string, "available" | "unavailable"> = {
+    exact: solverMap.get("exact") ?? (version !== null ? "available" : "unavailable"),
+    heuristic: solverMap.get("heuristic") ?? (version !== null ? "available" : "unavailable"),
+    qaoa: solverMap.get("qaoa") ?? "unavailable",
+    "cudaq-cpu": solverMap.get("cudaq-cpu") ?? "unavailable",
+    "cudaq-gpu": solverMap.get("cudaq-gpu") ?? "unavailable",
+  };
+
+  const qiskit = (cap.frameworks ?? []).find((f) => f.name === "qiskit");
+  const cudaq = (cap.frameworks ?? []).find((f) => f.name === "cudaq");
+  const cudaqTargets = cudaq?.targets ?? {};
+  const qpp = cudaqTargets["qpp_cpu"] as { available?: boolean } | undefined;
+  const nvidia = cudaqTargets["nvidia"] as { available?: boolean; gpu_count?: number | null } | undefined;
+
+  return {
+    variaq: {
+      installed: version !== null && cap.variaq?.version !== undefined,
+      version,
+      schema_version: schemaVersion ?? null,
+      python: c.pythonPath,
+      projectDir: c.projectDir,
+      resolvedFrom: c.source,
+      compatibility,
+    },
+    solvers,
+    frameworks: {
+      qiskit: {
+        installed: qiskit?.installed ?? false,
+        version: qiskit?.version ?? null,
+      },
+      cudaq: {
+        installed: cudaq?.installed ?? false,
+        version: cudaq?.version ?? null,
+        qpp_cpu_available: qpp?.available ?? false,
+        nvidia_available: nvidia?.available ?? false,
+        gpu_count: nvidia?.gpu_count ?? 0,
+      },
+    },
+    physical_qpu: {
+      supported: cap.physical_qpu?.supported ?? false,
+      installed: cap.physical_qpu?.installed ?? false,
+      available: cap.physical_qpu?.available ?? false,
+      reason: cap.physical_qpu?.reason ?? null,
+    },
+    store: {
+      dbPath: c.dbPath ?? "<variaq default: data/variaq.sqlite3>",
+      problemsDir: c.problemsDir ?? "<variaq default: data/problems>",
+    },
+    warnings: cap.warnings ?? [],
+  };
 }
 
-/** Extract the first `run-<uuid>` token from VariaQ table output. */
-export function extractRunId(stdout: string): string | null {
-  return extractRunIds(stdout)[0] ?? null;
+/**
+ * Extract data from a schema-v1 envelope, preserving status, warnings and error.
+ * On a non-success status the result still includes `data` and `error` so callers
+ * can choose whether to surface VariaQ's structured failure as an error.
+ */
+export function unwrapEnvelope<T = unknown>(
+  envelope: ParsedEnvelope,
+  command: string,
+): {
+  status: EnvelopeStatus;
+  data: T;
+  error: StructuredError | undefined;
+  warnings: StructuredWarning[];
+} {
+  if (envelope.command !== command && envelope.command !== `${command} json`) {
+    // Future VariaQ releases may append qualifiers; warn, do not hard-fail.
+  }
+  return {
+    status: envelope.status,
+    data: envelope.data as T,
+    error: envelope.error,
+    warnings: envelope.warnings,
+  };
 }
 
-/** Extract `Saved <problem-id>` from `variaq problem generate` output. */
-export function extractSavedProblemId(stdout: string): string | null {
-  const match = stdout.match(/^Saved\s+(\S+)\s+to\s+/m);
-  return match?.[1] ?? null;
+export interface SolveEnvelopeData {
+  run_id: string;
+  problem_id: string;
+  problem_type: string;
+  solver: string;
+  backend: string;
+  backend_type: string;
+  status: string;
+  solution: number[] | null;
+  objective: number | null;
+  best_known_objective: number | null;
+  best_known_source: string | null;
+  optimality_gap_percent: number | null;
+  approximation_ratio: number | null;
+  feasible: boolean | null;
+  constraint_violations: unknown[];
+  wall_time_seconds: number | null;
+  solver_time_seconds: number | null;
+  seed: number;
+  parameters: Record<string, unknown>;
+  qaoa_depth: number | null;
+  shots: number | null;
+  optimizer_trials: number | null;
+  candidate_parameter_digest: string | null;
+  selected_parameter_index: number | null;
+  selected_parameters: unknown;
+  expectation: number | null;
+  qubit_count: number | null;
+  circuit_depth: number | null;
+  gate_count: number | null;
+  logical_gate_count: number | null;
+  backend_metadata: Record<string, unknown>;
+  environment: Record<string, unknown>;
+  created_at: string;
 }
+
+export interface BenchmarkEnvelopeData {
+  problem: Record<string, unknown>;
+  runs: SolveEnvelopeData[];
+  comparison: {
+    aggregate_status: string;
+    best_known_objective: number | null;
+    best_known_source: string | null;
+    solver_count: number;
+    successful_count: number;
+    failed_count: number;
+    unavailable_count: number;
+  };
+}
+
+export interface CompareQuantumEnvelopeData extends BenchmarkEnvelopeData {
+  comparison: BenchmarkEnvelopeData["comparison"] & {
+    matched_qaoa: boolean;
+    qaoa_depth_p: number | null;
+    optimizer_trials: number | null;
+    shots: number | null;
+    seed: number | null;
+    candidate_parameter_digest: string | null;
+    identical_candidate_parameters: boolean;
+    max_expectation_delta: number;
+    best_parameter_indices: Record<string, number | null>;
+    precision: Record<string, string>;
+    backend_target: Record<string, string>;
+    unavailable: Array<{ solver: string; reason: string }>;
+  };
+}
+
+export interface ReproduceEnvelopeData {
+  original_run_id: string;
+  new_run_id: string;
+  rerun_of: string;
+  lineage: string;
+  original: {
+    run_id: string;
+    solver: string;
+    problem_id: string;
+    seed: number;
+    parameters: Record<string, unknown>;
+    environment: Record<string, unknown>;
+    result: { status: string; objective: number | null; backend: string };
+  };
+  new: {
+    run_id: string;
+    solver: string;
+    problem_id: string;
+    seed: number;
+    parameters: Record<string, unknown>;
+    environment: Record<string, unknown>;
+    result: SolveEnvelopeData;
+  };
+  environment_differences: Record<string, { original: unknown; new: unknown }>;
+}
+
+export interface ProblemGenerateData {
+  problem_id: string;
+  problem_type: string;
+  node_count: number;
+  edge_count: number;
+  seed: number;
+  path: string;
+}
+
+/** Extract the data payload from a successful envelope, preserving warnings. */
+export function successData<T>(
+  envelope: ParsedEnvelope,
+  command: string,
+): { data: T; warnings: StructuredWarning[] } {
+  const unwrapped = unwrapEnvelope<T>(envelope, command);
+  return { data: unwrapped.data, warnings: unwrapped.warnings };
+}
+
+/** Bound a string excerpt for error messages. */
+export function excerpt(text: string, max = 800): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}... [truncated ${text.length - max} chars]`;
+}
+
+export function exitCodeFromEnvelope(envelope: ParsedEnvelope, processCode: number): number {
+  if (processCode !== 0) return processCode;
+  if (envelope.status === "error") return 1;
+  return 0;
+}
+
+/** Re-export schema constants for convenience. */
+export { SUPPORTED_SCHEMA_VERSION, SUPPORTED_VARIAQ_SERIES, VERIFIED_VARIAQ_VERSION };

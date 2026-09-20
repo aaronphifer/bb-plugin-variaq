@@ -11,7 +11,7 @@ bb
   ↓
 bb-plugin-variaq
   ↓
-VariaQ CLI
+VariaQ schema-v1 CLI
   ↓
 VariaQ
   ├── classical
@@ -19,23 +19,28 @@ VariaQ
   └── CUDA-Q
 ```
 
+Starting with bb-plugin-variaq 0.2.0, the integration boundary is VariaQ's
+native `--json` output (schema version `1`). The plugin validates the envelope,
+forwards VariaQ's structured data, and no longer parses human-readable tables
+or scrapes run IDs from prose.
+
 VariaQ remains fully usable without BB. The plugin is responsible only for BB
 tool/CLI registration, validated argument construction, bounded subprocess
-execution, capability reporting, and resolving persisted run records.
+execution, and structured result forwarding.
 
 ## Prerequisites
 
 - BB 0.43.x with Plugin SDK 0.4.104
 - Node.js 22.19 or a compatible version supported by BB
 - Linux-native Python 3.12
-- a separate VariaQ 0.2.x installation; 0.2.0 is the verified version
+- a separate VariaQ 0.3.x installation; 0.3.0 is the verified version
 
 Create a VariaQ environment separately from this repository:
 
 ```bash
 git clone https://github.com/aaronphifer/variaq.git
 cd variaq
-git checkout d97fba07dd7ee4306154873d57cd36082e0d1cc9  # VariaQ 0.2.0
+git checkout v0.3.0  # VariaQ 0.3.0
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -e '.[quantum]'
 ```
@@ -46,7 +51,7 @@ The `quantum` extra supplies the local Qiskit workflow. CUDA-Q is optional:
 .venv/bin/python -m pip install -e '.[quantum,cudaq]'
 ```
 
-VariaQ 0.2.0 constrains CUDA-Q to `>=0.16,<0.17`; do not independently
+VariaQ 0.3.0 constrains CUDA-Q to `>=0.16,<0.17`; do not independently
 upgrade it beyond VariaQ's supported range.
 
 ## Installation
@@ -120,33 +125,31 @@ bb variaq solve "$problem_id" --solver heuristic --seed 42 --json
 bb variaq solve "$problem_id" --solver qaoa --seed 42 --json
 bb variaq benchmark "$problem_id" \
   --solvers exact,heuristic,qaoa --repeats 1 --seed 42 --json
+bb variaq compare-quantum "$problem_id" --p 1 --repeats 1 --json
 bb variaq runs --limit 10 --json
 bb variaq run run-<uuid> --json
 bb variaq reproduce run-<uuid> --json
 ```
 
-`solve`, `benchmark`, `compare-quantum`, and `reproduce` produce presentation
-text in VariaQ 0.2.x. The adapter extracts only stable `run-<uuid>` tokens and
-resolves every record with `variaq runs show`; it never parses human comparison
-prose. Native structured JSON from VariaQ would be preferable and remains a
-future upstream enhancement.
+All `solve`, `benchmark`, `compare-quantum`, and `reproduce` commands now
+return VariaQ's structured schema-v1 envelope directly. There is no prose
+parsing or run-ID scraping.
 
 ## Version compatibility
 
 The verified combination is:
 
 ```text
-bb-plugin-variaq 0.1.0
-VariaQ           0.2.0
+bb-plugin-variaq 0.2.0
+VariaQ           0.3.0
 Plugin SDK       0.4.104
 BB host          0.43.x
+VariaQ schema    1
 ```
 
-The plugin depends on the VariaQ 0.2 CLI grammar, exit codes, and run-ID output.
-It accepts VariaQ 0.2 patch releases and reports a warning for other or
-unparseable versions; it does not claim compatibility with arbitrary future
-VariaQ releases. The warning is diagnostic rather than a hard failure so users
-can still inspect a mismatched environment.
+bb-plugin-variaq 0.2.x is verified against VariaQ 0.3.x and schema version `1`.
+Patch releases within the 0.3 series are accepted. Other VariaQ series or future
+schema versions are reported as unsupported with a clear compatibility error.
 
 ## CUDA-Q and GPU behavior
 
@@ -155,10 +158,10 @@ workflows. `cudaq-cpu` is available only when CUDA-Q exposes `qpp-cpu`.
 `cudaq-gpu` additionally requires the NVIDIA target, a usable driver, and at
 least one GPU reported by CUDA-Q.
 
-Capabilities are probed on every status request. Driver resets, device
-allocation, container access, and other runtime changes can therefore make GPU
-availability appear or disappear without any plugin change. A registered
-NVIDIA target alone is not treated as a usable GPU.
+Capabilities are queried from VariaQ itself via `variaq capabilities --json`.
+Driver resets, device allocation, container access, and other runtime changes
+can therefore make GPU availability appear or disappear without any plugin
+change. A registered NVIDIA target alone is not treated as a usable GPU.
 
 One verified Pop!_OS development machine had CUDA-Q 0.16.0.post1, `qpp-cpu`,
 the NVIDIA target, and one compatible GPU. This is an example, not a portable
@@ -166,7 +169,7 @@ requirement or assumption.
 
 ## Limitations
 
-- VariaQ 0.2.0 provides local execution only; there is no physical-QPU path.
+- VariaQ 0.3.0 provides local execution only; there is no physical-QPU path.
 - There is no IBM Runtime/provider integration and no credential handling.
 - Generic CI does not require CUDA-Q, an NVIDIA GPU, a physical QPU, or remote
   services.
@@ -213,19 +216,25 @@ npm run test:integration
 ```
 
 The normal GitHub Actions plugin job uses the deterministic fake CLI. A
-separate Linux integration job checks out the immutable VariaQ 0.2.0 release
-commit, installs `.[quantum]`, and exercises local classical/Qiskit workflows.
-The upstream repository does not currently advertise a `v0.2.0` tag; CI can
-switch from the pinned commit when that tag exists. CUDA-Q and GPU verification
-remain manual or suitable for a future self-hosted runner.
+separate Linux integration job checks out the immutable VariaQ `v0.3.0` tag,
+installs `.[quantum]`, and exercises local classical/Qiskit workflows.
+CUDA-Q and GPU verification remain manual or suitable for a future self-hosted
+runner.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution boundaries and
 [SECURITY.md](SECURITY.md) for the subprocess security model.
 
 ## Failure behavior
 
-VariaQ's observed exit codes are preserved by the BB CLI, including the
-human-readable path: `0` success, `1` solver/runtime failure, and `2`
-usage/lookup failure. Subprocesses use argv arrays with `shell: false`, capture
-bounded stdout/stderr, and are terminated after the configured timeout. Error
-responses do not include the subprocess environment.
+VariaQ's exit codes are preserved by the BB CLI and agent tools:
+
+- `0` — success
+- `1` — solver/runtime failure (a run may still be persisted)
+- `2` — usage/lookup/input error
+
+Subprocesses use argv arrays with `shell: false`, capture bounded stdout/stderr,
+and are terminated after the configured timeout. In `--json` mode the plugin
+expects valid schema-v1 JSON on stdout; malformed output produces a clear
+integration error with bounded excerpts instead of heuristic recovery.
+
+Error responses do not include the subprocess environment.

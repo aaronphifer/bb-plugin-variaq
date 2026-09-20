@@ -53,6 +53,6 @@ if test "${VARIAQ_SMOKE_GPU:-0}" = "1" && \
 fi
 
 solver_csv=$(IFS=,; printf '%s' "${supported[*]}")
-run_bb variaq benchmark "$problem_id" --solvers "$solver_csv" --repeats 1 --seed 42 --json
-run_bb variaq runs --limit 10 --json
-run_bb variaq run "$first_run_id" --json
+run_bb variaq benchmark "$problem_id" --solvers "$solver_csv" --repeats 1 --seed 42 --json | jq '.runs | map(.run_id)'
+run_bb variaq runs --limit 10 --json | jq '.runs'
+run_bb variaq run "$first_run_id" --json | jq '.run'

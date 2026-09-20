@@ -9,14 +9,16 @@ import { Readable } from "node:stream";
 import {
   PluginError,
   checkVariaqVersion,
-  extractRunIds,
   parseJsonOutput,
   parseKeyValue,
   parseSolvers,
+  requireSuccess,
   resolveConfig,
   runVariaq,
+  runVariaqJson,
   type VariaqSettings,
 } from "../lib/runner.js";
+import { SUPPORTED_SCHEMA_VERSION, validateEnvelope } from "../lib/schema.js";
 import { join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -131,7 +133,7 @@ describe("runVariaq argv construction", () => {
       dbPath: "/data/variaq.sqlite3",
       problemsDir: "/data/problems",
     });
-    vi.mocked(spawn).mockReturnValueOnce(fakeProc(0, "variaq 0.2.0\n", "") as never);
+    vi.mocked(spawn).mockReturnValueOnce(fakeProc(0, "variaq 0.3.0\n", "") as never);
     await runVariaq(c, ["--version"]);
     const [cmd, argv, opts] = vi.mocked(spawn).mock.calls[0]!;
     expect(cmd).toBe(join(project, ".venv", "bin", "python"));
@@ -241,23 +243,106 @@ describe("input validators", () => {
   });
 });
 
+const validEnv = JSON.stringify({
+  schema_version: "1",
+  command: "solve",
+  status: "success",
+  data: { run_id: "run-abc" },
+  warnings: [],
+});
+
+describe("schema-v1 envelope validation", () => {
+  it("accepts schema_version 1", () => {
+    const parsed = validateEnvelope(validEnv);
+    expect(parsed.raw.schema_version).toBe("1");
+    expect(parsed.status).toBe("success");
+  });
+
+  it("rejects unknown schema version clearly", () => {
+    const bad = JSON.stringify({
+      schema_version: "2",
+      command: "solve",
+      status: "success",
+      data: {},
+    });
+    expect(() => validateEnvelope(bad)).toThrow(/Unsupported VariaQ output schema_version: 2/);
+  });
+
+  it("rejects malformed JSON", () => {
+    expect(() => validateEnvelope("not json")).toThrow(/not valid JSON/);
+  });
+
+  it("rejects missing envelope fields", () => {
+    expect(() => validateEnvelope(JSON.stringify({ schema_version: "1" }))).toThrow(/schema-v1 envelope/);
+  });
+
+  it("preserves warnings and errors", () => {
+    const partial = JSON.stringify({
+      schema_version: "1",
+      command: "benchmark",
+      status: "partial",
+      data: { runs: [] },
+      warnings: [{ type: "backend_unavailable", message: "gpu missing" }],
+      error: { type: "SolverError", message: "one solver failed", run_id: "run-1" },
+    });
+    const parsed = validateEnvelope(partial);
+    expect(parsed.status).toBe("partial");
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.error).toBeDefined();
+    expect(parsed.error?.type).toBe("SolverError");
+  });
+});
+
+describe("runVariaqJson", () => {
+  it("returns parsed envelope on success", async () => {
+    const c = resolveConfig({ ...base, projectDir: tempProject(true) });
+    vi.mocked(spawn).mockReturnValueOnce(fakeProc(0, validEnv, "") as never);
+    const result = await runVariaqJson(c, ["solve", "p", "--solver", "exact"]);
+    expect(result.envelope.command).toBe("solve");
+    expect(result.envelope.status).toBe("success");
+    expect(result.code).toBe(0);
+  });
+
+  it("returns JsonResult with error on nonzero exit with structured error", async () => {
+    const c = resolveConfig({ ...base, projectDir: tempProject(true) });
+    const err = JSON.stringify({
+      schema_version: "1",
+      command: "solve",
+      status: "error",
+      data: { run_id: "run-1" },
+      error: { type: "SolverError", message: "failed", run_id: "run-1" },
+    });
+    vi.mocked(spawn).mockReturnValueOnce(fakeProc(1, err, "") as never);
+    const result = await runVariaqJson(c, ["solve", "p", "--solver", "qaoa"]);
+    expect(result.code).toBe(1);
+    expect(result.envelope.error?.type).toBe("SolverError");
+    expect(() => requireSuccess(result, ["solve", "p", "--solver", "qaoa"])).toThrow(/SolverError: failed/);
+  });
+
+  it("throws PluginError on malformed JSON", async () => {
+    const c = resolveConfig({ ...base, projectDir: tempProject(true) });
+    vi.mocked(spawn).mockReturnValueOnce(fakeProc(0, "not json", "") as never);
+    await expect(runVariaqJson(c, ["capabilities"])).rejects.toThrow(/not valid JSON/);
+  });
+});
+
 describe("VariaQ output contracts", () => {
-  it("accepts patch releases in the verified 0.2 series", () => {
-    expect(checkVariaqVersion("variaq 0.2.0").supported).toBe(true);
-    expect(checkVariaqVersion("0.2.17").supported).toBe(true);
+  it("accepts patch releases in the verified 0.3 series", () => {
+    expect(checkVariaqVersion("variaq 0.3.0").supported).toBe(true);
+    expect(checkVariaqVersion("0.3.17").supported).toBe(true);
+    expect(checkVariaqVersion("0.3.0", "1").schemaVersionSupported).toBe(true);
   });
 
   it("warns without hard-failing for unsupported versions", () => {
-    const result = checkVariaqVersion("variaq 9.9.9");
+    const result = checkVariaqVersion("variaq 9.9.9", "1");
     expect(result.supported).toBe(false);
     expect(result.warning).toMatch(/Unsupported VariaQ version 9\.9\.9/);
   });
 
-  it("extracts and de-duplicates run ids regardless of surrounding prose", () => {
-    const a = "run-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    const b = "run-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    const output = `A completely redesigned heading\n(${a}) finished.\nHuman prose changed! ${b}\nRepeated ${a}`;
-    expect(extractRunIds(output)).toEqual([a, b]);
+  it("rejects unsupported schema versions", () => {
+    const result = checkVariaqVersion("variaq 0.3.0", "2");
+    expect(result.schemaVersionSupported).toBe(false);
+    expect(result.warning).toMatch(/schema_version 2/);
   });
 
   it("rejects malformed structured output", () => {

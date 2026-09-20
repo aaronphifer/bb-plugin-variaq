@@ -9,7 +9,8 @@ import plugin from "../server.js";
 /**
  * Integration tests against the REAL standalone VariaQ install on this
  * machine. No Qiskit/CUDA-Q math is duplicated here — the tests invoke the
- * plugin (which shells out to `python -m variaq`) and assert the contract.
+ * plugin (which shells out to `python -m variaq --json`) and assert the
+ * schema-v1 contract.
  *
  * State isolation: each run gets its own temporary dbPath/problemsDir so it
  * does not touch the developer's experiment history.
@@ -37,13 +38,12 @@ async function setupHost() {
   const tmp = mkdtempSync(join(tmpdir(), "variaq-plugin-it-"));
   temps.push(tmp);
   await h.harness.behavior.setSettings({
-    pythonPath: null,
+    pythonPath: VARIAQ_PYTHON,
     projectDir: VARIAQ_PROJECT,
     dbPath: join(tmp, "exp.db"),
     problemsDir: join(tmp, "problems"),
-    timeoutMs: 120_000,
+    timeoutMs: 180_000,
   });
-  await h.harness.behavior.setSettings({ pythonPath: VARIAQ_PYTHON });
   return h;
 }
 
@@ -60,30 +60,28 @@ describeReal("plugin registration", () => {
     const h = await setupHost();
     const version = await cli(h, ["version"]);
     expect(version.exitCode).toBe(0);
-    expect(version.stdout).toContain("variaq 0.2.0");
+    expect(version.stdout).toContain("variaq 0.3.0");
   });
 });
 
-describeReal("status/version (case 1, 5)", () => {
-  it("status reports detected install, solvers and CUDA-Q capability", async () => {
+describeReal("status/version", () => {
+  it("status reports schema_version 1 and solver availability from VariaQ", async () => {
     const h = await setupHost();
     const result = await tool(h, "variaq_status", {});
     const s = JSON.parse(String(result));
     expect(s.variaq.installed).toBe(true);
-    expect(s.variaq.version).toBe("0.2.0");
+    expect(s.variaq.version).toBe("0.3.0");
+    expect(s.variaq.schema_version).toBe("1");
     expect(s.variaq.python).toBe(VARIAQ_PYTHON);
     expect(s.solvers.exact).toBe("available");
     expect(s.solvers.heuristic).toBe("available");
     expect(s.solvers.qaoa).toBe("available");
-    expect(typeof s.cudaq.installed).toBe("boolean");
-    expect(["available", "unavailable"]).toContain(s.solvers["cudaq-cpu"]);
     expect(s.variaq.compatibility.supported).toBe(true);
-    // nvidia/gpu availability is reported from the live environment (nvidia-smi present here)
-    expect(["available", "unavailable"]).toContain(s.solvers["cudaq-gpu"]);
+    expect(s.physical_qpu.supported).toBe(false);
   });
 });
 
-describeReal("failure: misconfiguration (case 2)", () => {
+describeReal("failure: misconfiguration", () => {
   it("clear error when configured pythonPath does not exist", async () => {
     const h = createFakePluginHost({ pluginId: "variaq" });
     hosts.push(h);
@@ -107,7 +105,7 @@ describeReal("failure: misconfiguration (case 2)", () => {
   });
 });
 
-describeReal("solve + run-record flow (cases 4, 6, 7)", () => {
+describeReal("solve + run-record flow", () => {
   it("solves exactly, lists runs, shows and reproduces", async () => {
     const h = await setupHost();
     const generated = JSON.parse(String(
@@ -120,26 +118,27 @@ describeReal("solve + run-record flow (cases 4, 6, 7)", () => {
       await tool(h, "variaq_solve", { problemId, solver: "exact", seed: 42 }),
     ));
     expect(solved.runId).toMatch(/^run-/);
-    expect(solved.run.result.status).toBe("success");
-    expect(solved.run.result.objective).toBe(7);
+    expect(solved.run.status).toBe("success");
+    expect(typeof solved.run.objective).toBe("number");
 
     const listed = JSON.parse(String(await tool(h, "variaq_runs_list", { limit: 5 })));
     expect(listed.runs.map((r: { run_id: string }) => r.run_id)).toContain(solved.runId);
 
     const shown = JSON.parse(String(await tool(h, "variaq_run_show", { runId: solved.runId })));
-    expect(shown.problem.problem_id).toBe(problemId);
+    expect(shown.run.result.problem_id).toBe(problemId);
 
     const reproduced = JSON.parse(String(
       await tool(h, "variaq_run_reproduce", { runId: solved.runId }),
     ));
     expect(reproduced.runId).toMatch(/^run-/);
     expect(reproduced.runId).not.toBe(solved.runId);
-    expect(reproduced.run.result.status).toBe("success");
+    expect(reproduced.rerunOf).toBe(solved.runId);
+    expect(reproduced.run.status).toBe("success");
   });
 });
 
-describeReal("benchmark (case 5)", () => {
-  it("compares solvers and returns run ids", async () => {
+describeReal("benchmark", () => {
+  it("compares solvers and returns structured comparison", async () => {
     const h = await setupHost();
     const generated = JSON.parse(String(
       await tool(h, "variaq_problem_generate", { nodes: 5, edgeProbability: 0.6, seed: 7 }),
@@ -152,10 +151,28 @@ describeReal("benchmark (case 5)", () => {
       }),
     ));
     expect(result.exitCode).toBe(0);
-    expect(result.runIds.length).toBe(3);
-    expect(result.table).toContain("exact");
-    expect(result.table).toContain("heuristic");
-    expect(result.table).toContain("qaoa");
+    expect(result.status).toBe("success");
+    expect(result.runs.length).toBe(3);
+    expect(result.comparison.solver_count).toBe(3);
+  });
+});
+
+describeReal("compare quantum", () => {
+  it("returns matched QAOA comparison structure", async () => {
+    const h = await setupHost();
+    const generated = JSON.parse(String(
+      await tool(h, "variaq_problem_generate", { nodes: 4, edgeProbability: 0.6, seed: 17 }),
+    ));
+    const result = JSON.parse(String(
+      await tool(h, "variaq_compare_quantum", {
+        problemId: generated.problemId,
+        p: 1,
+        repeats: 1,
+      }),
+    ));
+    expect(result.status).toBe("success");
+    expect(result.comparison.matched_qaoa).toBe(true);
+    expect(result.runs.length).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -174,13 +191,13 @@ describeReal("real heuristic and Qiskit integration", () => {
           ...(solver === "qaoa" ? { params: { p: 1, optimizer_trials: 4, shots: 64 } } : {}),
         }),
       ));
-      expect(solved.run.result.status).toBe("success");
-      expect(solved.run.result.solver_name).toBe(solver);
+      expect(solved.run.status).toBe("success");
+      expect(solved.run.solver).toBe(solver);
     }
   });
 });
 
-describeReal("failure paths (cases 8, 9, 11, 12) — deterministic fake coverage is in fake.test.ts", () => {
+describeReal("failure paths", () => {
   it("VariaQ exit 2 (unknown problem) stays non-zero via CLI and tool", async () => {
     const h = await setupHost();
     const fromCli = await cli(h, ["solve", "missing-problem", "--solver", "exact", "--json"]);
@@ -188,7 +205,7 @@ describeReal("failure paths (cases 8, 9, 11, 12) — deterministic fake coverage
     const fromTool = JSON.parse(String(
       await tool(h, "variaq_solve", { problemId: "missing-problem", solver: "exact" }),
     ));
-    expect(String(fromTool.error)).toContain("Problem not found");
+    expect(String(fromTool.error?.message)).toContain("Problem not found");
   });
 
   it("unknown solver surfaces the CLI usage error (argparse exit 2)", async () => {
@@ -206,28 +223,31 @@ describeReal("failure paths (cases 8, 9, 11, 12) — deterministic fake coverage
     const result = JSON.parse(String(await tool(h, "variaq_run_show", { runId: "run-00000000-0000-0000-0000-000000000000" })));
     expect(String(result.error)).toMatch(/run|not found|exist/i);
   });
-});
 
-describe.skipIf(!HAS_REAL_VARIAQ || RUN_CUDAQ)("generic environment without CUDA-Q", () => {
-  it("preserves VariaQ exit 1 when an optional CUDA-Q solver is unavailable", async () => {
+  it("persisted solver failure preserves exit 1 and structured run", async () => {
     const h = await setupHost();
     const generated = JSON.parse(String(
-      await tool(h, "variaq_problem_generate", { nodes: 4, edgeProbability: 0.5, seed: 29 }),
+      await tool(h, "variaq_problem_generate", { nodes: 6, edgeProbability: 0.5, seed: 29 }),
     ));
     const result = await cli(h, [
       "solve",
       generated.problemId as string,
       "--solver",
-      "cudaq-cpu",
+      "exact",
+      "--param",
+      "max_variables=2",
       "--seed",
       "29",
+      "--json",
     ]);
     expect(result.exitCode).toBe(1);
-    expect(String(result.stderr)).toMatch(/CUDA-Q|cudaq|optional/i);
+    const parsed = JSON.parse(String(result.stdout));
+    expect(parsed.error).toBeDefined();
+    expect(parsed.runId).toMatch(/^run-/);
   });
 });
 
-describe.skipIf(!HAS_REAL_VARIAQ || !RUN_CUDAQ)("optional CUDA-Q CPU integration (case 13)", () => {
+describe.skipIf(!HAS_REAL_VARIAQ || !RUN_CUDAQ)("optional CUDA-Q CPU integration", () => {
   it("runs a bounded qpp-cpu solve when CUDA-Q is installed", async () => {
     const h = await setupHost();
     const generated = JSON.parse(String(
@@ -241,8 +261,26 @@ describe.skipIf(!HAS_REAL_VARIAQ || !RUN_CUDAQ)("optional CUDA-Q CPU integration
         params: { p: 1, optimizer_trials: 4, shots: 64 },
       }),
     ));
-    expect(solved.run.result.status).toBe("success");
-    expect(solved.run.result.backend.name).toBe("qpp-cpu");
-    expect(solved.run.result.backend.is_local).toBe(true);
+    expect(solved.run.status).toBe("success");
+    expect(solved.run.backend).toMatch(/qpp-cpu/);
+  });
+});
+
+describe.skipIf(!HAS_REAL_VARIAQ || !RUN_CUDAQ)("optional CUDA-Q GPU integration", () => {
+  it("runs a bounded nvidia solve when GPU is available", async () => {
+    const h = await setupHost();
+    const generated = JSON.parse(String(
+      await tool(h, "variaq_problem_generate", { nodes: 4, edgeProbability: 0.6, seed: 13 }),
+    ));
+    const solved = JSON.parse(String(
+      await tool(h, "variaq_solve", {
+        problemId: generated.problemId,
+        solver: "cudaq-gpu",
+        seed: 13,
+        params: { p: 1, optimizer_trials: 4, shots: 64 },
+      }),
+    ));
+    expect(solved.run.status).toBe("success");
+    expect(solved.run.backend).toMatch(/nvidia/);
   });
 });

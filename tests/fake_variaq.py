@@ -2,34 +2,38 @@
 """
 Deterministic stand-in for the VariaQ CLI used by bb-plugin-variaq tests.
 
-Behavior is driven entirely by argv so tests never touch a real VariaQ install,
-a real solver, or the network. Recognizes the plugin's argv shape:
+Emulates VariaQ 0.3.0 schema-v1 envelopes so tests can verify the plugin's
+JSON contract without touching a real VariaQ install or solver.
 
+Recognized argv shape:
   python fake_variaq.py [--db P] [--problems-dir P] <command> <args...>
-
-Commands:
-  --version                                   -> exit 0, "variaq 9.9.9"
-  probe  (not a real variaq command; the plugin's capability probe invokes
-         `python -c <script>` — that path is exercised via env, not here)
-  problem generate maxcut --nodes N --edge-probability P --seed S
-                                              -> exit 0, prints a Saved line
-  problem show <id>                           -> prints {"problem_id": id, ...} JSON
-  solve <id> --solver S ...                   -> table with a run-uuid; specific
-                                               solver names force exit codes:
-      solver "fail1"  -> exit 1 with stderr (simulates persisted FAILED run)
-      solver "lookup" -> exit 2 with stderr (simulates problem-not-found)
-  benchmark ...                               -> table with run-ids
-  runs list --limit N                         -> JSON list
-  runs show <id>                              -> JSON object; id "run-missing" -> exit 2
-  runs reproduce <id>                         -> table with a new run-uuid;
-                                               id "run-missing" -> exit 2
-  hang                                        -> sleep long enough to trigger
-                                                 the plugin timeout
 """
 import json
 import os
 import sys
 import time
+import uuid
+
+OUTPUT_SCHEMA_VERSION = "1"
+
+
+def envelope(command, status, data, warnings=None, error=None):
+    out = {
+        "schema_version": OUTPUT_SCHEMA_VERSION,
+        "command": command,
+        "status": status,
+        "data": data,
+    }
+    if warnings:
+        out["warnings"] = warnings
+    if error:
+        out["error"] = error
+    return out
+
+
+def fake_run_id():
+    return f"run-{uuid.uuid4()}"
+
 
 def main(argv):
     args = list(argv)
@@ -39,6 +43,9 @@ def main(argv):
         args = args[2:]
 
     if args and args[0] == "-c":
+        # Capability probe path (the plugin invokes python -c <script>). We
+        # mimic the old probe dict shape only for the probe; the real
+        # capabilities come from `capabilities --json` in the new contract.
         mode = os.environ.get("FAKE_CUDAQ", "unavailable")
         available = mode in ("available", "driver-down")
         print(json.dumps({
@@ -64,30 +71,97 @@ def main(argv):
     cmd = args[0]
 
     if cmd == "--version":
-        print("variaq 9.9.9")
+        version = os.environ.get("FAKE_VARIAQ_VERSION", "9.9.9")
+        print(f"variaq {version}")
         return 0
 
     if cmd == "hang":
         time.sleep(30)
         return 0
 
+    if cmd == "capabilities":
+        mode = os.environ.get("FAKE_CUDAQ", "unavailable")
+        available = mode in ("available", "driver-down")
+        nvidia_available = available and mode == "available"
+        warnings = []
+        if not available:
+            warnings.append({
+                "type": "optional_dependency_missing",
+                "message": "CUDA-Q is not installed; cudaq-cpu and cudaq-gpu are unavailable",
+            })
+        elif mode == "driver-down":
+            warnings.append({
+                "type": "backend_availability",
+                "message": "CUDA-Q NVIDIA target present but reports no compatible GPU",
+            })
+        version = os.environ.get("FAKE_VARIAQ_VERSION", "9.9.9")
+        solvers = [
+            {"name": "exact", "supported": True, "installed": True, "available": True},
+            {"name": "heuristic", "supported": True, "installed": True, "available": True},
+            {"name": "qaoa", "supported": True, "installed": True, "available": True},
+            {"name": "cudaq-cpu", "supported": True, "installed": available, "available": available,
+             "reason": "CUDA-Q not installed" if not available else None},
+            {"name": "cudaq-gpu", "supported": True, "installed": available, "available": nvidia_available,
+             "reason": "No compatible GPU" if available and not nvidia_available else
+                      "CUDA-Q not installed" if not available else None},
+        ]
+        print(json.dumps(envelope("capabilities", "success", {
+            "variaq": {
+                "version": version,
+                "output_schema_version": OUTPUT_SCHEMA_VERSION,
+                "python_version": "3.12.3",
+                "python_implementation": "cpython",
+            },
+            "problem_families": [{"name": "maxcut", "supported": True}],
+            "solvers": solvers,
+            "frameworks": [
+                {"name": "qiskit", "version": "2.5.2", "installed": True},
+                {"name": "cudaq", "version": "0.16.0.post1" if available else None, "installed": available,
+                 "targets": {
+                     "qpp_cpu": {"installed": available, "available": available},
+                     "nvidia": {"installed": available, "available": nvidia_available,
+                                "gpu_count": 1 if nvidia_available else 0},
+                 }},
+            ],
+            "physical_qpu": {
+                "supported": False,
+                "installed": False,
+                "available": False,
+                "reason": "Physical QPU execution is not supported in VariaQ 0.3.0",
+            },
+            "warnings": warnings,
+        })))
+        return 0
+
     if cmd == "problem" and len(args) > 1 and args[1] == "generate":
         def value(flag, default):
             return args[args.index(flag) + 1] if flag in args else default
-        print("Saved maxcut-fake000000001 to data/problems/maxcut-fake000000001.json")
-        print(f"nodes={value('--nodes', '?')} edge_probability={value('--edge-probability', '?')} seed={value('--seed', '?')}")
+        print(json.dumps(envelope("problem generate", "success", {
+            "problem_id": "maxcut-fake000000001",
+            "problem_type": "maxcut",
+            "node_count": int(value("--nodes", "6")),
+            "edge_count": 8,
+            "seed": int(value("--seed", "0")),
+            "path": "data/problems/maxcut-fake000000001.json",
+        })))
         return 0
 
     if cmd == "problem" and len(args) > 1 and args[1] == "show":
         pid = args[2] if len(args) > 2 else "unknown"
         if pid == "missing":
-            print("error: Problem not found: missing", file=sys.stderr)
+            print(json.dumps(envelope("problem show", "error", None, error={
+                "type": "ValidationError",
+                "message": f"Problem not found: {pid}",
+            })))
             return 2
-        print(json.dumps({
-            "problem_id": pid, "problem_type": "maxcut", "schema_version": 1,
-            "node_count": 6, "edges": [{"u": 0, "v": 1, "weight": 1.0}],
+        print(json.dumps(envelope("problem show", "success", {
+            "problem_id": pid,
+            "problem_type": "maxcut",
+            "node_count": 6,
+            "edge_count": 8,
+            "edges": [{"u": 0, "v": 1, "weight": 1.0}],
             "sense": "maximize",
-        }))
+        })))
         return 0
 
     if cmd == "solve":
@@ -96,42 +170,212 @@ def main(argv):
         for i, a in enumerate(args):
             if a == "--solver" and i + 1 < len(args):
                 solver = args[i + 1]
+        seed = 0
+        for i, a in enumerate(args):
+            if a == "--seed" and i + 1 < len(args):
+                seed = int(args[i + 1])
         if problem == "hang":
             time.sleep(30)
             return 0
         if problem == "missing":
-            print(f"error: Problem not found: {problem}", file=sys.stderr)
+            print(json.dumps(envelope("solve", "error", None, error={
+                "type": "ValidationError",
+                "message": f"Problem not found: {problem}",
+            })))
             return 2
         if problem == "fail1":
-            print("error: MissingOptionalDependency: simulated", file=sys.stderr)
-            print("solver    status   objective  best  gap %  wall s  backend       run id")
-            print("--------  -------  ---------  ----  -----  ------  ------------  ----------------------------------------")
-            print(f"{solver}  failed   -          -     -      0.0     not-executed  run-11111111-1111-4111-8111-111111111111")
+            run_id = fake_run_id()
+            print(json.dumps(envelope("solve", "error", {
+                "run_id": run_id,
+                "problem_id": problem,
+                "solver": solver,
+                "backend": "not-executed",
+                "backend_type": "unavailable",
+                "status": "failed",
+                "objective": None,
+            }, error={
+                "type": "MissingOptionalDependency",
+                "message": "simulated solver failure",
+                "run_id": run_id,
+            })))
             return 1
-        print("solver    status   objective  best  gap %  wall s  backend  run id")
-        print("--------  -------  ---------  ----  -----  ------  -------  ----------------------------------------")
-        print(f"{solver}  success  7          7     0      0.0     fake     run-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        run_id = fake_run_id()
+        print(json.dumps(envelope("solve", "success", {
+            "run_id": run_id,
+            "problem_id": problem,
+            "problem_type": "maxcut",
+            "solver": solver,
+            "backend": "fake",
+            "backend_type": "classical_cpu",
+            "status": "success",
+            "solution": [0, 0, 1, 1, 1, 1],
+            "objective": 7.0,
+            "best_known_objective": 7.0,
+            "best_known_source": "exact_optimum",
+            "optimality_gap_percent": 0.0,
+            "approximation_ratio": 1.0,
+            "feasible": True,
+            "constraint_violations": [],
+            "wall_time_seconds": 0.001,
+            "solver_time_seconds": 0.001,
+            "seed": seed,
+            "parameters": {},
+            "qaoa_depth": None,
+            "shots": None,
+            "optimizer_trials": None,
+            "candidate_parameter_digest": None,
+            "selected_parameter_index": None,
+            "selected_parameters": None,
+            "expectation": None,
+            "qubit_count": None,
+            "circuit_depth": None,
+            "gate_count": None,
+            "logical_gate_count": None,
+            "backend_metadata": {"name": "fake", "backend_type": "classical_cpu", "is_local": True},
+            "environment": {"packages": {"variaq": os.environ.get("FAKE_VARIAQ_VERSION", "9.9.9")}},
+            "created_at": "2026-01-01T00:00:00+00:00",
+        })))
         return 0
 
     if cmd == "benchmark":
-        print("solver     status   objective  best  gap %  wall s  backend  run id")
-        print("---------  -------  ---------  ----  -----  ------  -------  ----------------------------------------")
-        print("exact      success  7          7     0      0.0     fake     run-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-        print("heuristic  success  7          7     0      0.0     fake     run-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        solvers = ["exact", "heuristic"]
+        for i, a in enumerate(args):
+            if a == "--solvers" and i + 1 < len(args):
+                solvers = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+        problem = args[1] if len(args) > 1 else "maxcut-fake000000001"
+        runs = []
+        for solver in solvers:
+            runs.append({
+                "run_id": fake_run_id(),
+                "problem_id": problem,
+                "problem_type": "maxcut",
+                "solver": solver,
+                "backend": "fake",
+                "backend_type": "classical_cpu",
+                "status": "success",
+                "solution": [0, 0, 1, 1, 1, 1],
+                "objective": 7.0,
+                "best_known_objective": 7.0,
+                "best_known_source": "exact_optimum",
+                "optimality_gap_percent": 0.0,
+                "approximation_ratio": 1.0,
+                "feasible": True,
+                "constraint_violations": [],
+                "wall_time_seconds": 0.001,
+                "solver_time_seconds": 0.001,
+                "seed": 0,
+                "parameters": {},
+                "backend_metadata": {"name": "fake", "backend_type": "classical_cpu", "is_local": True},
+                "environment": {},
+                "created_at": "2026-01-01T00:00:00+00:00",
+            })
+        print(json.dumps(envelope("benchmark", "success", {
+            "problem": {
+                "problem_id": problem,
+                "problem_type": "maxcut",
+                "node_count": 6,
+                "edge_count": 8,
+            },
+            "runs": runs,
+            "comparison": {
+                "aggregate_status": "success",
+                "best_known_objective": 7.0,
+                "best_known_source": "exact_optimum",
+                "solver_count": len(runs),
+                "successful_count": len(runs),
+                "failed_count": 0,
+                "unavailable_count": 0,
+            },
+        })))
         return 0
 
     if cmd == "compare":
-        print("solver     status   objective  best  gap %  wall s  backend  run id")
-        print("---------  -------  ---------  ----  -----  ------  -------  ----------------------------------------")
-        print("qaoa       success  7          7     0      0.0     fake     run-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-        print("cudaq-cpu  success  7          7     0      0.0     fake     run-cccccccc-cccc-4ccc-8ccc-cccccccccccc")
-        print("")
-        print("Matched quantum detail:")
-        print("  seed=42: identical_candidates=yes")
+        problem = args[2] if len(args) > 2 else "maxcut-fake000000001"
+        solvers = ["qaoa", "cudaq-cpu"]
+        for i, a in enumerate(args):
+            if a == "--solvers" and i + 1 < len(args):
+                solvers = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+        p = 1
+        for i, a in enumerate(args):
+            if a == "--p" and i + 1 < len(args):
+                p = int(args[i + 1])
+        repeats = 1
+        for i, a in enumerate(args):
+            if a == "--repeats" and i + 1 < len(args):
+                repeats = int(args[i + 1])
+        runs = []
+        for solver in solvers:
+            runs.append({
+                "run_id": fake_run_id(),
+                "problem_id": problem,
+                "problem_type": "maxcut",
+                "solver": solver,
+                "backend": "fake" if solver == "qaoa" else "qpp-cpu",
+                "backend_type": "quantum_simulator" if solver == "qaoa" else "quantum_simulator",
+                "status": "success",
+                "solution": [0, 0, 1, 1, 1, 1],
+                "objective": 7.0,
+                "best_known_objective": 7.0,
+                "best_known_source": "stored_exact_optimum",
+                "optimality_gap_percent": 0.0,
+                "approximation_ratio": 1.0,
+                "feasible": True,
+                "constraint_violations": [],
+                "wall_time_seconds": 0.001,
+                "solver_time_seconds": 0.001,
+                "seed": 42,
+                "parameters": {"p": p, "optimizer_trials": 4, "shots": 64, "precision": "fp64" if solver.startswith("cudaq") else None},
+                "backend_metadata": {
+                    "name": "fake" if solver == "qaoa" else "qpp-cpu",
+                    "backend_type": "quantum_simulator",
+                    "is_local": True,
+                    "metrics": {
+                        "candidate_parameter_digest": "abc123",
+                        "candidate_expectations": [3.8, 3.8],
+                        "best_parameter_index": 0,
+                    },
+                },
+                "environment": {},
+                "created_at": "2026-01-01T00:00:00+00:00",
+            })
+        print(json.dumps(envelope("compare quantum", "success", {
+            "problem": {
+                "problem_id": problem,
+                "problem_type": "maxcut",
+                "node_count": 6,
+                "edge_count": 8,
+            },
+            "runs": runs,
+            "comparison": {
+                "aggregate_status": "success",
+                "best_known_objective": 7.0,
+                "best_known_source": "stored_exact_optimum",
+                "solver_count": len(runs),
+                "successful_count": len(runs),
+                "failed_count": 0,
+                "unavailable_count": 0,
+                "matched_qaoa": True,
+                "qaoa_depth_p": p,
+                "optimizer_trials": 4,
+                "shots": 64,
+                "seed": 42,
+                "candidate_parameter_digest": "abc123",
+                "identical_candidate_parameters": True,
+                "max_expectation_delta": 0.0,
+                "best_parameter_indices": {solver: 0 for solver in solvers},
+                "precision": {solver: "fp64" if solver.startswith("cudaq") else None for solver in solvers},
+                "backend_target": {solver: ("fake" if solver == "qaoa" else "qpp-cpu") for solver in solvers},
+                "unavailable": [],
+            },
+        })))
         return 0
 
     if cmd == "runs" and len(args) > 1 and args[1] == "list":
-        print(json.dumps([{
+        limit = 20
+        for i, a in enumerate(args):
+            if a == "--limit" and i + 1 < len(args):
+                limit = int(args[i + 1])
+        rows = [{
             "run_id": "run-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "benchmark_id": None,
             "created_at": "2026-01-01T00:00:00+00:00",
@@ -144,34 +388,75 @@ def main(argv):
             "backend_type": "classical_cpu",
             "backend_name": "fake",
             "seed": 42,
-        }]))
+        }]
+        print(json.dumps(envelope("runs list", "success", rows[:limit])))
         return 0
 
     if cmd == "runs" and len(args) > 1 and args[1] == "show":
         rid = args[2] if len(args) > 2 else "run-missing"
         if rid == "run-missing":
-            print(f"error: no such run {rid}", file=sys.stderr)
+            print(json.dumps(envelope("runs show", "error", None, error={
+                "type": "ValidationError",
+                "message": f"no such run {rid}",
+            })))
             return 2
-        print(json.dumps({
-            "run_id": rid, "problem_id": "maxcut-fake000000001",
+        print(json.dumps(envelope("runs show", "success", {
+            "run_id": rid,
+            "problem_id": "maxcut-fake000000001",
             "solver_config": {"name": "exact", "seed": 42, "parameters": {}},
             "result": {"solver_name": "exact", "status": "success", "objective": 7.0},
-        }))
+        })))
         return 0
 
     if cmd == "runs" and len(args) > 1 and args[1] == "reproduce":
         rid = args[2] if len(args) > 2 else "run-missing"
         if rid == "run-missing":
-            print(f"error: no such run {rid}", file=sys.stderr)
+            print(json.dumps(envelope("runs reproduce", "error", None, error={
+                "type": "ValidationError",
+                "message": f"no such run {rid}",
+            })))
             return 2
-        print("solver  status   objective  best  gap %  wall s  backend  run id")
-        print("------  -------  ---------  ----  -----  ------  -------  ----------------------------------------")
-        print("exact   success  7          7     0      0.0     fake     run-dddddddd-dddd-4ddd-8ddd-dddddddddddd")
-        print(f"reproduced_from={rid}")
+        new_id = fake_run_id()
+        print(json.dumps(envelope("runs reproduce", "success", {
+            "original_run_id": rid,
+            "new_run_id": new_id,
+            "rerun_of": rid,
+            "lineage": f"{new_id} -> rerun_of {rid}",
+            "original": {
+                "run_id": rid,
+                "solver": "exact",
+                "problem_id": "maxcut-fake000000001",
+                "seed": 42,
+                "parameters": {},
+                "environment": {"python_version": "3.12.3", "variaq_version": "0.3.0"},
+                "result": {"status": "success", "objective": 7.0, "backend": "fake"},
+            },
+            "new": {
+                "run_id": new_id,
+                "solver": "exact",
+                "problem_id": "maxcut-fake000000001",
+                "seed": 42,
+                "parameters": {},
+                "environment": {"python_version": "3.12.3", "variaq_version": "0.3.0"},
+                "result": {
+                    "run_id": new_id,
+                    "problem_id": "maxcut-fake000000001",
+                    "problem_type": "maxcut",
+                    "solver": "exact",
+                    "backend": "fake",
+                    "backend_type": "classical_cpu",
+                    "status": "success",
+                    "objective": 7.0,
+                    "seed": 42,
+                },
+            },
+            "environment_differences": {},
+        })))
         return 0
 
     print(f"fake_variaq: unrecognized argv {args}", file=sys.stderr)
     return 2
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
