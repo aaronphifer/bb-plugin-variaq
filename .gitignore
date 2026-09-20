@@ -1,0 +1,35 @@
+node_modules/
+dist/
+coverage/
+logs/
+*.log
+*.local
+.env
+.env.*
+!.env.example
+.tmp/
+tmp/
+.cache/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# Local BB/editor state
+.bb/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Generated VariaQ/runtime data (fixtures under tests/ remain tracked)
+data/
+problems/
+runs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*

@@ -1,0 +1,72 @@
+{
+  "name": "bb-plugin-variaq",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Thin bb adapter for the standalone VariaQ hybrid-compute research platform.",
+  "license": "Apache-2.0",
+  "files": [
+    "dist/server.js",
+    "dist/server.meta.json",
+    "lib/",
+    "server.ts",
+    "skills/",
+    "scripts/smoke.sh",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bb": ">=0.43.0 <0.44.0",
+    "bbPluginSdk": "0.4.104"
+  },
+  "bb": {
+    "name": "VariaQ",
+    "description": "Run VariaQ classical/quantum experiments from bb against a standalone VariaQ install.",
+    "branding": {
+      "icon": "Zap"
+    },
+    "server": "./server.ts",
+    "skills": [
+      "skills"
+    ]
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.104",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "bb-app": "0.43.0",
+    "better-sqlite3": "^12.11.1",
+    "cron-parser": "^5.10.1",
+    "hono": "^4.13.8",
+    "typescript": "^5.7.0",
+    "vitest": "^5.0.1"
+  },
+  "scripts": {
+    "build": "bb plugin build",
+    "sdk:check": "bb plugin types --check",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/runner.test.ts tests/fake.test.ts",
+    "test:integration": "vitest run tests/server.test.ts",
+    "smoke": "bash scripts/smoke.sh"
+  },
+  "keywords": [
+    "bb-plugin",
+    "variaq",
+    "quantum-computing",
+    "qaoa",
+    "maxcut"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aaronphifer/bb-plugin-variaq.git"
+  },
+  "homepage": "https://github.com/aaronphifer/bb-plugin-variaq#readme",
+  "bugs": {
+    "url": "https://github.com/aaronphifer/bb-plugin-variaq/issues"
+  }
+}
