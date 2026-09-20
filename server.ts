@@ -1,34 +1,23 @@
 import { z } from "zod";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import crypto from "node:crypto";
+import { problemFamilySchema, type ProblemFamily } from "./lib/schema.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import {
-  PluginError,
-  checkVariaqVersion,
-  parseJsonOutput,
-  parseKeyValue,
-  parseSolvers,
-  probeCapabilities,
-  requireSuccess,
-  resolveConfig,
-  runVariaqJson,
-  runVariaqStrict,
-  statusFromCapabilities,
-  type ResolvedConfig,
-  type VariaqSettings,
-  type CompareQuantumEnvelopeData,
-  type BenchmarkEnvelopeData,
-  type ReproduceEnvelopeData,
-  type ProblemGenerateData,
-  type SolveEnvelopeData,
-} from "./lib/runner.js";
+import { PluginError, checkVariaqVersion, generateProblemArgv, parseJsonOutput, parseKeyValue, parseSolvers, probeCapabilities, requireSuccess, resolveConfig, runVariaqJson, runVariaqStrict, solverSupportsFamily, statusFromCapabilities } from "./lib/runner.js";
+import type { ResolvedConfig, VariaqSettings, CompareQuantumEnvelopeData, BenchmarkEnvelopeData, ReproduceEnvelopeData, ProblemGenerateData, SolveEnvelopeData, FamilyGenerateInput, VariaqSolver } from "./lib/runner.js";
 
 const SOLVERS = ["exact", "heuristic", "qaoa", "cudaq-cpu", "cudaq-gpu"] as const;
+const VARIAQ_SOLVERS = SOLVERS;
 const solverEnum = z.enum(SOLVERS);
 
 const USAGE = `bb variaq — Run VariaQ classical/quantum experiments from bb
 
   bb variaq status [--json]
   bb variaq version [--json]
-  bb variaq problem-generate --nodes N --edge-probability P --seed S [--json]
+  bb variaq problem-generate FAMILY [--nodes N] [--edge-probability P] [--task-count T] [--resource-count R] [--candidate-count C] [--partition-count K] --seed S [--json]
+  bb variaq problem-import <json-content-or-path> [--output PATH] [--json]
   bb variaq problem-show <problem-id> [--json]
   bb variaq solve <problem-id> --solver <${SOLVERS.join("|")}> [--seed S] [--param KEY=VALUE ...] [--json]
   bb variaq benchmark <problem-id> [--solvers a,b] [--repeats N] [--seed S] [--json]
@@ -36,6 +25,8 @@ const USAGE = `bb variaq — Run VariaQ classical/quantum experiments from bb
   bb variaq runs [--limit N] [--json]
   bb variaq run <run-id> [--json]
   bb variaq reproduce <run-id> [--json]
+
+Problem families: maxcut, assignment, subset-selection, graph-partition.
 
 This plugin shells out to the standalone VariaQ CLI. Solver/quantum logic
 lives in VariaQ — never here. CUDA-Q solvers require VariaQ's 'cudaq' extra;
@@ -90,6 +81,16 @@ export default async function plugin(bb: BbPluginApi) {
     return resolveConfig(raw);
   }
 
+  async function detectProblemFamily(c: ResolvedConfig, problemId: string): Promise<ProblemFamily | null> {
+    const showResult = await runVariaqJson(c, ["problem", "show", problemId], { timeoutMs: 15_000 });
+    if (showResult.code !== 0) return null;
+    const family = (showResult.envelope.data as Record<string, unknown> | null)?.family;
+    if (typeof family === "string" && problemFamilySchema.safeParse(family).success) {
+      return family as ProblemFamily;
+    }
+    return null;
+  }
+
   // ------------------------------------------------------------------ ops --
 
   async function opStatus() {
@@ -112,15 +113,11 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  async function opProblemGenerate(input: { nodes: number; edgeProbability: number; seed: number }) {
+  async function opProblemGenerate(input: FamilyGenerateInput) {
     const c = await cfg();
-    const result = await runVariaqJson(c, [
-      "problem", "generate", "maxcut",
-      "--nodes", String(input.nodes),
-      "--edge-probability", String(input.edgeProbability),
-      "--seed", String(input.seed),
-    ]);
-    const envelope = requireSuccess(result, ["problem", "generate", "maxcut"]);
+    const argv = generateProblemArgv(input);
+    const result = await runVariaqJson(c, argv);
+    const envelope = requireSuccess(result, ["problem", "generate", input.family]);
     const { data, warnings } = successData<ProblemGenerateData>(envelope, "problem generate");
     return { problemId: data.problem_id, data, warnings };
   }
@@ -133,6 +130,59 @@ export default async function plugin(bb: BbPluginApi) {
     return { problem: data, warnings };
   }
 
+  async function opProblemImport(input: { content: string; output?: string }) {
+    const c = await cfg();
+    // Security boundary: we never read an arbitrary agent-supplied path. The
+    // caller provides the artifact content as a string; we write it to a
+    // temporary file in the configured problems directory (or OS temp) and pass
+    // that controlled path to VariaQ.
+    const workDir = c.problemsDir ?? tmpdir();
+    await fs.mkdir(workDir, { recursive: true });
+    const tempFile = join(workDir, `import-${crypto.randomUUID()}.json`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(input.content);
+    } catch (err) {
+      throw new PluginError(
+        "Problem import content is not valid JSON.",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    // Basic sanity check: imported artifact must declare a known family.
+    const family = (parsed as Record<string, unknown>)?.family;
+    if (typeof family !== "string" || !problemFamilySchema.safeParse(family).success) {
+      throw new PluginError(
+        `Problem import artifact must declare a valid family (one of maxcut, assignment, subset-selection, graph-partition).`,
+        `Received family: ${String(family)}`,
+      );
+    }
+    await fs.writeFile(tempFile, input.content, "utf8");
+    const argv = ["problem", "import", tempFile];
+    if (input.output !== undefined) argv.push("--output", input.output);
+    try {
+      const result = await runVariaqJson(c, argv, { timeoutMs: 15_000 });
+      const envelope = requireSuccess(result, ["problem", "import"]);
+      const { data, warnings } = successData<Record<string, unknown>>(envelope, "problem import");
+      const importedId = data.problem_id as string | undefined;
+      // Return the full problem document by re-reading it from VariaQ.
+      if (importedId !== undefined) {
+        const showResult = await runVariaqJson(c, ["problem", "show", importedId], { timeoutMs: 15_000 });
+        if (showResult.code === 0) {
+          const showData = successData<Record<string, unknown>>(showResult.envelope, "problem show");
+          return { problem: showData.data, warnings: [...warnings, ...showData.warnings], tempFile };
+        }
+      }
+      return { problem: data, warnings, tempFile };
+    } finally {
+      // Best-effort cleanup of the temporary import artifact.
+      try {
+        await fs.unlink(tempFile);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   async function opSolve(input: {
     problemId: string;
     solver: string;
@@ -140,6 +190,30 @@ export default async function plugin(bb: BbPluginApi) {
     params: [string, string][];
   }) {
     const c = await cfg();
+    // Capability-driven pre-check: VariaQ is authoritative about solver/family compatibility.
+    if (SOLVERS.includes(input.solver as typeof SOLVERS[number])) {
+      const family = await detectProblemFamily(c, input.problemId);
+      if (family !== null) {
+        const cap = await probeCapabilities(c);
+        const solverSupportedFamilies = Object.fromEntries(
+          (cap.solvers ?? []).map((s) => [s.name, s.supported_families ?? []] as const),
+        );
+        if (!solverSupportsFamily(input.solver as typeof SOLVERS[number], family, solverSupportedFamilies)) {
+          return {
+            exitCode: 2,
+            timedOut: false,
+            runId: undefined,
+            run: undefined,
+            error: {
+              type: "ValidationError",
+              message: `Solver '${input.solver}' does not support problem family '${family}'; supported families: ${(solverSupportedFamilies[input.solver] ?? []).join(", ")}.`,
+            },
+            warnings: [],
+            stderr: null,
+          };
+        }
+      }
+    }
     const args = ["solve", input.problemId, "--solver", input.solver, "--seed", String(input.seed)];
     for (const [k, v] of input.params) args.push("--param", `${k}=${v}`);
     const result = await runVariaqJson(c, args);
@@ -198,6 +272,21 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function opCompareQuantum(input: { problemId: string; p: number; repeats: number }) {
     const c = await cfg();
+    const family = await detectProblemFamily(c, input.problemId);
+    const cap = await probeCapabilities(c);
+    const solverSupportedFamilies = Object.fromEntries(
+      (cap.solvers ?? []).map((s) => [s.name, s.supported_families ?? []] as const),
+    );
+    const quantumSolvers = ["qaoa", "cudaq-cpu", "cudaq-gpu"] as const;
+    if (family !== null) {
+      const supported = quantumSolvers.filter((solver) => solverSupportsFamily(solver, family, solverSupportedFamilies));
+      if (supported.length === 0) {
+        throw new PluginError(
+          `compare quantum has no available quantum solvers for problem family '${family}'.`,
+          "Use a problem family supported by qaoa/cudaq-* (currently maxcut), or run individual solvers via variaq_solve.",
+        );
+      }
+    }
     const args = [
       "compare", "quantum", input.problemId,
       "--p", String(input.p),
@@ -282,8 +371,13 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "version", summary: "Show the VariaQ CLI version", usage: "bb variaq version [--json]" },
       {
         name: "problem-generate",
-        summary: "Generate a deterministic MaxCut problem",
-        usage: "bb variaq problem-generate --nodes N --edge-probability P --seed S [--json]",
+        summary: "Generate a deterministic problem in a generic family",
+        usage: "bb variaq problem-generate FAMILY --seed S [family-specific options] [--json]",
+      },
+      {
+        name: "problem-import",
+        summary: "Import a problem artifact JSON string into VariaQ",
+        usage: "bb variaq problem-import <json-content> [--output PATH] [--json]",
       },
       { name: "problem-show", summary: "Show a saved problem as JSON", usage: "bb variaq problem-show <problem-id> [--json]" },
       {
@@ -317,12 +411,59 @@ export default async function plugin(bb: BbPluginApi) {
           case "version":
             return opVersion();
           case "problem-generate": {
+            const family = args[0];
+            if (family === undefined || family.startsWith("--")) {
+              throw new PluginError("Missing problem family.", "Usage: bb variaq problem-generate <maxcut|assignment|subset-selection|graph-partition> ...");
+            }
+            if (!problemFamilySchema.safeParse(family).success) {
+              throw new PluginError(`Unknown problem family: ${family}`, "Valid families: maxcut, assignment, subset-selection, graph-partition");
+            }
+            const opts = readOptions(args.slice(1));
+            const seed = requiredInt(opts, "seed");
+            const familyTyped = family as ProblemFamily;
+            switch (familyTyped) {
+              case "maxcut": {
+                const input: FamilyGenerateInput = {
+                  family: "maxcut",
+                  seed,
+                  nodes: requiredInt(opts, "nodes"),
+                  edgeProbability: requiredFloat(opts, "edge-probability"),
+                };
+                return opProblemGenerate(input);
+              }
+              case "assignment": {
+                const input: FamilyGenerateInput = {
+                  family: "assignment",
+                  seed,
+                  taskCount: requiredInt(opts, "task-count"),
+                  resourceCount: requiredInt(opts, "resource-count"),
+                };
+                return opProblemGenerate(input);
+              }
+              case "subset-selection": {
+                const input: FamilyGenerateInput = {
+                  family: "subset-selection",
+                  seed,
+                  candidateCount: requiredInt(opts, "candidate-count"),
+                };
+                return opProblemGenerate(input);
+              }
+              case "graph-partition": {
+                const input: FamilyGenerateInput = {
+                  family: "graph-partition",
+                  seed,
+                  nodes: requiredInt(opts, "nodes"),
+                  edgeProbability: requiredFloat(opts, "edge-probability"),
+                  partitionCount: requiredInt(opts, "partition-count"),
+                };
+                return opProblemGenerate(input);
+              }
+            }
+          }
+          case "problem-import": {
+            const content = requiredPositional(args, "json-content");
             const opts = readOptions(args);
-            return opProblemGenerate({
-              nodes: requiredInt(opts, "nodes"),
-              edgeProbability: requiredFloat(opts, "edge-probability"),
-              seed: requiredInt(opts, "seed"),
-            });
+            return opProblemImport({ content, output: opts.get("output") });
           }
           case "problem-show":
             return opProblemShow(requiredPositional(args, "problem-id"));
@@ -463,17 +604,38 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "variaq_problem_generate",
     description:
-      "Generate a deterministic MaxCut problem in the standalone VariaQ install and return its problem id.",
+      "Generate a deterministic VariaQ problem in one of the generic problem families (maxcut, assignment, subset-selection, graph-partition) and return its problem id.",
     instructions:
-      "Use variaq_problem_generate to create a MaxCut problem before solving. Deterministic: same nodes/edgeProbability/seed → same problem.",
-    parameters: z.object({
-      nodes: z.number().int().min(2).max(64).describe("Number of graph nodes"),
-      edgeProbability: z.number().gt(0).lte(1).describe("Erdos-Renyi edge probability (0,1]"),
-      seed: z.number().int().min(0).describe("Deterministic generation seed"),
-    }),
-    async execute({ nodes, edgeProbability, seed }) {
+      "Use variaq_problem_generate to create a problem before solving. Pick the family first; family-specific fields are required only for that family. Deterministic: same parameters/seed → same problem.",
+    parameters: z.discriminatedUnion("family", [
+      z.object({
+        family: z.literal("maxcut"),
+        nodes: z.number().int().min(2).max(64).describe("Number of graph nodes"),
+        edgeProbability: z.number().gt(0).lte(1).describe("Erdos-Renyi edge probability (0,1]"),
+        seed: z.number().int().min(0).describe("Deterministic generation seed"),
+      }),
+      z.object({
+        family: z.literal("assignment"),
+        taskCount: z.number().int().min(1).max(256).describe("Number of tasks to assign"),
+        resourceCount: z.number().int().min(1).max(256).describe("Number of resources"),
+        seed: z.number().int().min(0).describe("Deterministic generation seed"),
+      }),
+      z.object({
+        family: z.literal("subset-selection"),
+        candidateCount: z.number().int().min(1).max(512).describe("Number of candidates"),
+        seed: z.number().int().min(0).describe("Deterministic generation seed"),
+      }),
+      z.object({
+        family: z.literal("graph-partition"),
+        nodes: z.number().int().min(2).max(64).describe("Number of graph nodes"),
+        edgeProbability: z.number().gt(0).lte(1).describe("Erdos-Renyi edge probability (0,1]"),
+        partitionCount: z.number().int().min(2).max(16).describe("Number of partitions"),
+        seed: z.number().int().min(0).describe("Deterministic generation seed"),
+      }),
+    ]),
+    async execute(input) {
       try {
-        const result = await opProblemGenerate({ nodes, edgeProbability, seed });
+        const result = await opProblemGenerate(input as FamilyGenerateInput);
         return JSON.stringify({ problemId: result.problemId, data: result.data, warnings: result.warnings }, null, 2);
       } catch (err) {
         return errorResult(err);
@@ -483,10 +645,10 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "variaq_problem_show",
-    description: "Show a saved VariaQ problem (id, type, nodes, edges, generation metadata) as JSON.",
+    description: "Show a saved VariaQ problem (id, family, objective sense, opaque IDs, and family-specific data) as JSON.",
     instructions: "Use variaq_problem_show to inspect a problem before solving it.",
     parameters: z.object({
-      problemId: z.string().min(1).describe("Problem id, e.g. maxcut-bff76da580f66c21"),
+      problemId: z.string().min(1).describe("Problem id or path, e.g. maxcut-bff76da580f66c21"),
     }),
     async execute({ problemId }) {
       try {
@@ -499,11 +661,29 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.agents.registerTool({
+    name: "variaq_problem_import",
+    description: "Import a VariaQ problem artifact (JSON content) into the configured problems directory and return the persisted problem.",
+    instructions: "Use variaq_problem_import to bring an externally prepared VariaQ problem artifact into the VariaQ store. Pass the full JSON document as content, not a filesystem path. The artifact must declare a valid family and schema_version.",
+    parameters: z.object({
+      content: z.string().min(1).describe("The problem artifact JSON document as a string"),
+      output: z.string().min(1).optional().describe("Optional explicit output path inside the configured problems directory"),
+    }),
+    async execute({ content, output }) {
+      try {
+        const result = await opProblemImport({ content, output });
+        return JSON.stringify({ problem: result.problem, warnings: result.warnings }, null, 2);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  });
+
+  bb.agents.registerTool({
     name: "variaq_solve",
     description:
-      "Run one VariaQ solver on a problem and persist the run. Returns the run id plus the full run record (objective, gap, solution, backend metrics).",
+      "Run one VariaQ solver on a generic problem and persist the run. Returns the run id plus the full run record (objective, gap, solution, backend metrics).",
     instructions:
-      "Use variaq_solve for a single solver run. Solvers: exact, heuristic, qaoa (Qiskit statevector), cudaq-cpu, cudaq-gpu. CUDA-Q solvers fail unless VariaQ was installed with the 'cudaq' extra; cudaq-gpu additionally needs a working NVIDIA toolchain. No physical QPU execution exists.",
+      "Use variaq_solve for a single solver run on a VariaQ generic problem. Solvers: exact, heuristic (all families), qaoa (MaxCut only), cudaq-cpu, cudaq-gpu (MaxCut only, require cudaq extra). No physical QPU execution exists.",
     parameters: z.object({
       problemId: z.string().min(1).describe("Problem id from variaq_problem_generate or the VariaQ CLI"),
       solver: solverEnum.describe("Solver name"),
@@ -530,7 +710,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "variaq_benchmark",
-    description: "Compare several VariaQ solvers on one problem. Returns run ids and the VariaQ comparison structure.",
+    description: "Compare several VariaQ solvers on one generic problem. Returns run ids and the VariaQ comparison structure.",
     instructions: "Use variaq_benchmark to compare exact vs heuristic vs qaoa (and cudaq-* when available) on the same problem.",
     parameters: z.object({
       problemId: z.string().min(1).describe("Problem id"),
@@ -556,9 +736,9 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "variaq_compare_quantum",
     description:
-      "Run VariaQ's matched Qiskit/CUDA-Q QAOA comparison on one problem. Returns the per-solver run records and the matched comparison structure.",
+      "Run VariaQ's matched Qiskit/CUDA-Q QAOA comparison on a MaxCut problem. Returns the per-solver run records and the matched comparison structure.",
     instructions:
-      "Use variaq_compare_quantum to compare matched QAOA implementations. CUDA-Q solvers require VariaQ's 'cudaq' extra.",
+      "Use variaq_compare_quantum to compare matched QAOA implementations on a problem supported by VariaQ's quantum solvers (currently MaxCut only in VariaQ 0.4.x). CUDA-Q solvers require VariaQ's 'cudaq' extra. The plugin consults VariaQ capabilities to decide eligibility.",
     parameters: z.object({
       problemId: z.string().min(1).describe("Problem id"),
       p: z.number().int().min(1).max(4).optional().describe("QAOA depth p (default 1)"),
@@ -727,6 +907,7 @@ function unwrapEnvelope<T = unknown>(
 }
 
 /** Human-readable default for the CLI; full JSON under --json. */
+/** Human-readable default for the CLI; full JSON under --json. */
 function formatCliOutput(value: unknown, json: boolean): string {
   if (json) return JSON.stringify(value, null, 2);
   if (typeof value !== "object" || value === null) return String(value);
@@ -743,6 +924,8 @@ function formatCliOutput(value: unknown, json: boolean): string {
         compatibility: { warning: string | null };
       };
       solvers: Record<string, string>;
+      problem_families: string[];
+      solver_supported_families: Record<string, string[]>;
       frameworks: Record<string, unknown>;
       physical_qpu: Record<string, unknown>;
     };
@@ -753,12 +936,16 @@ function formatCliOutput(value: unknown, json: boolean): string {
       `  schema_version: ${status.variaq.schema_version ?? "unknown"}`,
       `  python: ${status.variaq.python}`,
       `  resolved from: ${status.variaq.resolvedFrom}`,
+      `  families: ${(status.problem_families ?? []).join(", ")}`,
       ...(status.variaq.compatibility.warning === null
         ? []
         : [`  warning: ${status.variaq.compatibility.warning}`]),
       ``,
       `Solvers:`,
-      ...Object.entries(status.solvers).map(([name, s]) => `  ${name}: ${s}`),
+      ...Object.entries(status.solvers).map(([name, s]) => {
+        const families = (status.solver_supported_families?.[name] ?? []).join(", ");
+        return `  ${name}: ${s}${families ? ` (${families})` : ""}`;
+      }),
       ``,
       `Frameworks:`,
       ...Object.entries(status.frameworks).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
@@ -776,14 +963,50 @@ function formatCliOutput(value: unknown, json: boolean): string {
       ? `${String(record.stdout).trimEnd()}\nWarning: ${warning}`
       : String(record.stdout).trimEnd();
   }
-  if ("problemId" in record) return JSON.stringify(record, null, 2);
-  if ("problem" in record) return JSON.stringify(record.problem, null, 2);
-
-  if ("runId" in record && "run" in record) {
-    return JSON.stringify(value, null, 2);
+  if ("problemId" in record) {
+    const gen = record.data as Record<string, unknown> | undefined;
+    const family = gen?.family ?? gen?.problem_type ?? "unknown";
+    return `Generated ${family} problem\n  problem_id: ${String(record.problemId)}\n  family: ${String(family)}\n  seed: ${String(gen?.seed ?? "?")}`;
+  }
+  if ("problem" in record && record.problem !== null) {
+    const p = record.problem as Record<string, unknown>;
+    const family = p.family ?? p.problem_type ?? "unknown";
+    const sense = p.sense ?? "unknown";
+    const id = p.problem_id ?? "unknown";
+    return `Problem ${String(id)}\n  family: ${String(family)}\n  sense: ${String(sense)}\n${JSON.stringify(p, null, 2)}`;
   }
 
-  if ("runIds" in record) return JSON.stringify(value, null, 2);
+  if ("runId" in record && "run" in record) {
+    const run = record.run as Record<string, unknown> | undefined;
+    const family = run?.problem_type ?? run?.family ?? "unknown";
+    const solver = run?.solver ?? "unknown";
+    const backend = run?.backend ?? "unknown";
+    const objective = run?.objective ?? "?";
+    const feasible = run?.feasible ?? "?";
+    return `Run ${String(record.runId)}\n  family: ${String(family)}\n  solver: ${String(solver)}\n  backend: ${String(backend)}\n  objective: ${String(objective)}\n  feasible: ${String(feasible)}\n${JSON.stringify(record, null, 2)}`;
+  }
+
+  if ("runIds" in record) {
+    if ("comparison" in record && record.comparison !== null) {
+      const comparison = record.comparison as Record<string, unknown>;
+      const runs = record.runs as Record<string, unknown>[] | undefined;
+      const firstRun = runs?.[0];
+      const family = (firstRun as Record<string, unknown> | undefined)?.problem_type ?? "unknown";
+      const lines = [
+        `Benchmark family: ${String(family)}`,
+        `  aggregate_status: ${String(comparison.aggregate_status ?? "?")}`,
+        `  solvers: ${String(comparison.solver_count ?? "?")}`,
+        `  successful: ${String(comparison.successful_count ?? "?")}, failed: ${String(comparison.failed_count ?? "?")}, unavailable: ${String(comparison.unavailable_count ?? "?")}`,
+      ];
+      for (const run of runs ?? []) {
+        lines.push(`  ${String(run.solver)}: status=${String(run.status)}, objective=${String(run.objective ?? "?")}, gap=${String(run.optimality_gap_percent ?? "?")}, time=${String(run.wall_time_seconds ?? "?")}s`);
+      }
+      lines.push("");
+      lines.push(JSON.stringify(record, null, 2));
+      return lines.join("\n");
+    }
+    return JSON.stringify(value, null, 2);
+  }
   if ("runs" in record) return JSON.stringify(record.runs, null, 2);
 
   return JSON.stringify(value, null, 2);

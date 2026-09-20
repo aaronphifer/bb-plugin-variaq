@@ -19,12 +19,9 @@ status_json=$(run_bb variaq status --json)
 printf '%s\n' "$status_json"
 run_bb variaq version --json
 
-if problem_json=$(run_bb variaq problem-generate \
-  --nodes 6 --edge-probability 0.5 --seed 42 --json 2>&1); then
+if problem_json=$(run_bb variaq problem-generate maxcut --nodes 6 --edge-probability 0.5 --seed 42 --json 2>&1); then
   problem_id=$(printf '%s\n' "$problem_json" | jq -er '.problemId')
 elif [[ "$problem_json" =~ (maxcut-[0-9a-f]{16})\.json ]]; then
-  # VariaQ intentionally will not overwrite a deterministic problem. Reuse
-  # the stable id only after proving that record is still readable.
   problem_id=${BASH_REMATCH[1]}
   run_bb variaq problem-show "$problem_id" --json >/dev/null
 else
@@ -32,6 +29,19 @@ else
   exit 1
 fi
 printf 'problem_id=%s\n' "$problem_id"
+
+# Bounded generic-family smoke: assignment
+assign_json=$(run_bb variaq problem-generate assignment --task-count 4 --resource-count 3 --seed 1 --json 2>&1)
+if assign_id=$(printf '%s\n' "$assign_json" | jq -er '.problemId' 2>&1); then
+  :
+elif [[ "$assign_json" =~ (assignment-[0-9a-f]{16})\.json ]]; then
+  assign_id=${BASH_REMATCH[1]}
+else
+  printf '%s\n' "$assign_json" >&2
+  exit 1
+fi
+run_bb variaq solve "$assign_id" --solver exact --seed 1 --json | jq -er '.runId'
+run_bb variaq benchmark "$assign_id" --solvers exact,heuristic --repeats 1 --seed 1 --json | jq '.comparison.aggregate_status'
 
 first_run_id=""
 supported=(exact heuristic qaoa)

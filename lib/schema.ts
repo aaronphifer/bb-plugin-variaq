@@ -56,6 +56,22 @@ export type StructuredWarning = z.infer<typeof structuredWarningSchema>;
 export type Envelope = z.infer<typeof envelopeSchema>;
 export type EnvelopeStatus = z.infer<typeof envelopeStatusSchema>;
 
+export const PROBLEM_FAMILIES = [
+  "maxcut",
+  "assignment",
+  "subset-selection",
+  "graph-partition",
+] as const;
+
+export type ProblemFamily = (typeof PROBLEM_FAMILIES)[number];
+
+export const problemFamilySchema = z.enum(PROBLEM_FAMILIES);
+
+/** Validate a problem family name against VariaQ 0.4 generic families. */
+export function isProblemFamily(value: string): value is ProblemFamily {
+  return PROBLEM_FAMILIES.includes(value as ProblemFamily);
+}
+
 export interface ParsedEnvelope {
   command: string;
   status: EnvelopeStatus;
@@ -69,9 +85,9 @@ export interface ParsedEnvelope {
 export const SUPPORTED_SCHEMA_VERSION = "1";
 
 /** Compatibility metadata, mirrored here for the schema module. */
-export const BB_PLUGIN_VARIAQ_VERSION = "0.2.0";
-export const VERIFIED_VARIAQ_VERSION = "0.3.0";
-export const SUPPORTED_VARIAQ_SERIES = "0.3.x";
+export const BB_PLUGIN_VARIAQ_VERSION = "0.3.0";
+export const VERIFIED_VARIAQ_VERSION = "0.4.1";
+export const SUPPORTED_VARIAQ_SERIES = "0.4.x";
 
 /**
  * Validate a VariaQ JSON envelope.

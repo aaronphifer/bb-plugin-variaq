@@ -4,11 +4,13 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import {
   type EnvelopeStatus,
   type ParsedEnvelope,
+  type ProblemFamily,
   type StructuredError,
   type StructuredWarning,
   SUPPORTED_SCHEMA_VERSION,
   SUPPORTED_VARIAQ_SERIES,
   VERIFIED_VARIAQ_VERSION,
+  isProblemFamily,
   validateEnvelope,
 } from "./schema.js";
 
@@ -33,6 +35,42 @@ export const VARIAQ_SOLVERS = [
 ] as const;
 
 export type VariaqSolver = (typeof VARIAQ_SOLVERS)[number];
+
+export interface ProblemGenerateInput {
+  family: ProblemFamily;
+  seed: number;
+  output?: string;
+}
+
+export interface MaxCutGenerateInput extends ProblemGenerateInput {
+  family: "maxcut";
+  nodes: number;
+  edgeProbability: number;
+}
+
+export interface AssignmentGenerateInput extends ProblemGenerateInput {
+  family: "assignment";
+  taskCount: number;
+  resourceCount: number;
+}
+
+export interface SubsetSelectionGenerateInput extends ProblemGenerateInput {
+  family: "subset-selection";
+  candidateCount: number;
+}
+
+export interface GraphPartitionGenerateInput extends ProblemGenerateInput {
+  family: "graph-partition";
+  nodes: number;
+  edgeProbability: number;
+  partitionCount: number;
+}
+
+export type FamilyGenerateInput =
+  | MaxCutGenerateInput
+  | AssignmentGenerateInput
+  | SubsetSelectionGenerateInput
+  | GraphPartitionGenerateInput;
 
 export interface CommandResult {
   code: number;
@@ -497,7 +535,7 @@ export async function runPython(
 }
 
 /**
- * VariaQ 0.3.0 capabilities --json data shape. We only model the pieces the
+ * VariaQ 0.4.0 capabilities --json data shape. We only model the pieces the
  * plugin reads; everything else is forwarded as unknown.
  */
 export interface CapabilitiesData {
@@ -514,6 +552,7 @@ export interface CapabilitiesData {
     installed?: boolean;
     available?: boolean;
     reason?: string | null;
+    supported_families?: string[];
   }>;
   frameworks?: Array<{
     name: string;
@@ -521,6 +560,7 @@ export interface CapabilitiesData {
     installed?: boolean;
     targets?: Record<string, unknown>;
   }>;
+  solver_supported_families?: Record<string, string[]>;
   physical_qpu?: {
     supported?: boolean;
     installed?: boolean;
@@ -569,20 +609,20 @@ export interface VariaqVersionCompatibility {
 }
 
 /**
- * bb-plugin-variaq 0.2.0 is verified against VariaQ 0.3.0 / schema_version 1.
- * Patch releases in the 0.3 series are accepted. Other series are reported as
+ * bb-plugin-variaq 0.3.0 is verified against VariaQ 0.4.0 / schema_version 1.
+ * Patch releases in the 0.4 series are accepted. Other series are reported as
  * unsupported so users can still inspect a mismatched environment.
  */
 export function checkVariaqVersion(raw: string | null, schemaVersion?: string): VariaqVersionCompatibility {
   const match = raw?.match(/(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\b|$)/);
   const version = match ? `${match[1]}.${match[2]}.${match[3]}` : null;
-  const supported = match?.[1] === "0" && match?.[2] === "3";
+  const supported = match?.[1] === "0" && match?.[2] === "4";
   const schemaVersionSupported = schemaVersion === undefined || schemaVersion === SUPPORTED_SCHEMA_VERSION;
 
   const parts: string[] = [];
   if (!supported) {
     parts.push(
-      `Unsupported VariaQ version ${version ?? "unknown"}; bb-plugin-variaq 0.2.0 is verified with VariaQ ${VERIFIED_VARIAQ_VERSION} and supports ${SUPPORTED_VARIAQ_SERIES}.`,
+      `Unsupported VariaQ version ${version ?? "unknown"}; bb-plugin-variaq 0.3.0 is verified with VariaQ ${VERIFIED_VARIAQ_VERSION} and supports ${SUPPORTED_VARIAQ_SERIES}.`,
     );
   }
   if (!schemaVersionSupported) {
@@ -629,13 +669,17 @@ export async function statusFromCapabilities(
   const solverMap = new Map(
     (cap.solvers ?? []).map((s) => [s.name, solverAvailability(s)] as const),
   );
+  const solverSupportedFamilies = new Map(
+    (cap.solvers ?? []).map((s) => [s.name, s.supported_families ?? []] as const),
+  );
   const solvers: Record<string, "available" | "unavailable"> = {
-    exact: solverMap.get("exact") ?? (version !== null ? "available" : "unavailable"),
-    heuristic: solverMap.get("heuristic") ?? (version !== null ? "available" : "unavailable"),
+    exact: solverMap.get("exact") ?? "unavailable",
+    heuristic: solverMap.get("heuristic") ?? "unavailable",
     qaoa: solverMap.get("qaoa") ?? "unavailable",
     "cudaq-cpu": solverMap.get("cudaq-cpu") ?? "unavailable",
     "cudaq-gpu": solverMap.get("cudaq-gpu") ?? "unavailable",
   };
+  const families = (cap.problem_families ?? []).map((f) => f.name).filter(isProblemFamily) as ProblemFamily[];
 
   const qiskit = (cap.frameworks ?? []).find((f) => f.name === "qiskit");
   const cudaq = (cap.frameworks ?? []).find((f) => f.name === "cudaq");
@@ -654,6 +698,8 @@ export async function statusFromCapabilities(
       compatibility,
     },
     solvers,
+    solver_supported_families: Object.fromEntries(solverSupportedFamilies),
+    problem_families: families,
     frameworks: {
       qiskit: {
         installed: qiskit?.installed ?? false,
@@ -799,13 +845,54 @@ export interface ReproduceEnvelopeData {
   environment_differences: Record<string, { original: unknown; new: unknown }>;
 }
 
+
+/** Build argv for `variaq problem generate` from a family-aware input. */
+export function generateProblemArgv(input: FamilyGenerateInput): string[] {
+  const argv: string[] = ["problem", "generate", input.family, "--seed", String(input.seed)];
+  if (input.output !== undefined) argv.push("--output", input.output);
+  switch (input.family) {
+    case "maxcut":
+      argv.push("--nodes", String(input.nodes), "--edge-probability", String(input.edgeProbability));
+      return argv;
+    case "assignment":
+      argv.push("--task-count", String(input.taskCount), "--resource-count", String(input.resourceCount));
+      return argv;
+    case "subset-selection":
+      argv.push("--candidate-count", String(input.candidateCount));
+      return argv;
+    case "graph-partition":
+      argv.push(
+        "--nodes", String(input.nodes),
+        "--edge-probability", String(input.edgeProbability),
+        "--partition-count", String(input.partitionCount),
+      );
+      return argv;
+  }
+}
+
+/** Return true when VariaQ capabilities list the solver as supporting the family. */
+export function solverSupportsFamily(
+  solver: VariaqSolver,
+  family: ProblemFamily,
+  supportedFamilies: Record<string, string[]>,
+): boolean {
+  const families = supportedFamilies[solver];
+  if (!Array.isArray(families)) return false;
+  return families.includes(family);
+}
+
 export interface ProblemGenerateData {
   problem_id: string;
   problem_type: string;
-  node_count: number;
-  edge_count: number;
+  family: ProblemFamily;
   seed: number;
   path: string;
+  node_count?: number;
+  edge_count?: number;
+  task_count?: number;
+  resource_count?: number;
+  candidate_count?: number;
+  partition_count?: number;
 }
 
 /** Extract the data payload from a successful envelope, preserving warnings. */
