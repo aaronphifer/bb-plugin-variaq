@@ -3,37 +3,26 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
   PluginError,
   checkVariaqVersion,
-  extractRunId,
-  extractRunIds,
-  extractSavedProblemId,
   parseJsonOutput,
   parseKeyValue,
   parseSolvers,
   probeCapabilities,
+  requireSuccess,
   resolveConfig,
-  runVariaq,
+  runVariaqJson,
   runVariaqStrict,
+  statusFromCapabilities,
   type ResolvedConfig,
   type VariaqSettings,
+  type CompareQuantumEnvelopeData,
+  type BenchmarkEnvelopeData,
+  type ReproduceEnvelopeData,
+  type ProblemGenerateData,
+  type SolveEnvelopeData,
 } from "./lib/runner.js";
 
 const SOLVERS = ["exact", "heuristic", "qaoa", "cudaq-cpu", "cudaq-gpu"] as const;
 const solverEnum = z.enum(SOLVERS);
-
-const runListRowSchema = z.object({
-  run_id: z.string(),
-  benchmark_id: z.string().nullable().optional(),
-  created_at: z.string(),
-  problem_id: z.string(),
-  solver_name: z.string(),
-  status: z.string(),
-  objective: z.number().nullable(),
-  feasible: z.union([z.boolean(), z.number()]).nullable().optional(),
-  wall_time_seconds: z.number().nullable().optional(),
-  backend_type: z.string().nullable().optional(),
-  backend_name: z.string().nullable().optional(),
-  seed: z.number().nullable().optional(),
-});
 
 const USAGE = `bb variaq — Run VariaQ classical/quantum experiments from bb
 
@@ -105,57 +94,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function opStatus() {
     const c = await cfg();
-    const [probe, versionResult] = await Promise.all([
-      probeCapabilities(c),
-      runVariaq(c, ["--version"], { timeoutMs: 15_000 }),
-    ]);
-
-    const variaqInstalled = probe.variaq_installed === true && versionResult.code === 0;
-    const qiskitInstalled = probe.qiskit_installed === true;
-    const cudaqInstalled = probe.cudaq_installed === true;
-    const qppCpu = cudaqInstalled && probe.qpp_cpu_target === true;
-    const gpuCount = typeof probe.gpu_count === "number" ? probe.gpu_count : 0;
-    const nvidiaTarget = cudaqInstalled && probe.nvidia_target === true;
-    const nvidiaDriver = probe.nvidia_driver_usable === true;
-    const nvidiaAvailable = nvidiaTarget && nvidiaDriver && gpuCount > 0;
-
-    const solvers: Record<string, "available" | "unavailable"> = {
-      exact: variaqInstalled ? "available" : "unavailable",
-      heuristic: variaqInstalled ? "available" : "unavailable",
-      qaoa: variaqInstalled && qiskitInstalled ? "available" : "unavailable",
-      "cudaq-cpu": variaqInstalled && qppCpu ? "available" : "unavailable",
-      "cudaq-gpu": variaqInstalled && nvidiaAvailable ? "available" : "unavailable",
-    };
-
-    const version =
-      (typeof probe.variaq_version === "string" ? probe.variaq_version : null) ??
-      (versionResult.code === 0 ? versionResult.stdout.trim().replace(/^variaq\s+/, "") : null);
-    const compatibility = checkVariaqVersion(version);
-
-    return {
-      variaq: {
-        installed: variaqInstalled,
-        version,
-        python: c.pythonPath,
-        projectDir: c.projectDir,
-        resolvedFrom: c.source,
-        compatibility,
-      },
-      solvers,
-      cudaq: {
-        installed: cudaqInstalled,
-        version: typeof probe.cudaq_version === "string" ? probe.cudaq_version : null,
-        qppCpu: qppCpu ? "available" : "unavailable",
-        nvidiaTarget: nvidiaTarget ? "available" : "unavailable",
-        nvidiaDriver: nvidiaDriver ? "available" : "unavailable",
-        gpuCount,
-        nvidia: nvidiaAvailable ? "available" : "unavailable",
-      },
-      store: {
-        dbPath: c.dbPath ?? "<variaq default: data/variaq.sqlite3>",
-        problemsDir: c.problemsDir ?? "<variaq default: data/problems>",
-      },
-    };
+    const versionResult = await runVariaqStrict(c, ["--version"], { timeoutMs: 15_000 });
+    const version = versionResult.stdout.trim().replace(/^variaq\s+/, "");
+    const cap = await probeCapabilities(c);
+    const status = await statusFromCapabilities(c, cap);
+    return status;
   }
 
   async function opVersion() {
@@ -171,19 +114,23 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function opProblemGenerate(input: { nodes: number; edgeProbability: number; seed: number }) {
     const c = await cfg();
-    const result = await runVariaqStrict(c, [
+    const result = await runVariaqJson(c, [
       "problem", "generate", "maxcut",
       "--nodes", String(input.nodes),
       "--edge-probability", String(input.edgeProbability),
       "--seed", String(input.seed),
     ]);
-    return { problemId: extractSavedProblemId(result.stdout), stdout: result.stdout };
+    const envelope = requireSuccess(result, ["problem", "generate", "maxcut"]);
+    const { data, warnings } = successData<ProblemGenerateData>(envelope, "problem generate");
+    return { problemId: data.problem_id, data, warnings };
   }
 
   async function opProblemShow(problemId: string) {
     const c = await cfg();
-    const result = await runVariaqStrict(c, ["problem", "show", problemId], { timeoutMs: 15_000 });
-    return { problem: parseJsonOutput(result.stdout, "problem show") };
+    const result = await runVariaqJson(c, ["problem", "show", problemId], { timeoutMs: 15_000 });
+    const envelope = requireSuccess(result, ["problem", "show", problemId]);
+    const { data, warnings } = successData<Record<string, unknown>>(envelope, "problem show");
+    return { problem: data, warnings };
   }
 
   async function opSolve(input: {
@@ -195,16 +142,27 @@ export default async function plugin(bb: BbPluginApi) {
     const c = await cfg();
     const args = ["solve", input.problemId, "--solver", input.solver, "--seed", String(input.seed)];
     for (const [k, v] of input.params) args.push("--param", `${k}=${v}`);
-    const result = await runVariaq(c, args);
-    const runId = extractRunId(result.stdout);
-    const { run } = runId !== null ? await opRun(runId) : { run: null };
+    const result = await runVariaqJson(c, args);
+    const envelope = result.envelope;
+    if (result.code !== 0) {
+      return {
+        exitCode: result.code,
+        timedOut: result.timedOut,
+        runId: envelope.error?.run_id ?? (typeof envelope.data === "object" && envelope.data !== null ? (envelope.data as { run_id?: string }).run_id : undefined),
+        run: typeof envelope.data === "object" && envelope.data !== null ? envelope.data : undefined,
+        error: envelope.error,
+        warnings: envelope.warnings,
+        stderr: null,
+      };
+    }
+    const { data, warnings } = successData<SolveEnvelopeData>(envelope, "solve");
     return {
-      exitCode: result.timedOut ? -1 : result.code,
+      exitCode: result.code,
       timedOut: result.timedOut,
-      runId,
-      run,
-      stderr: result.stderr.trim() || null,
-      stdout: result.stdout,
+      runId: data.run_id,
+      run: data,
+      warnings,
+      stderr: null,
     };
   }
 
@@ -215,77 +173,91 @@ export default async function plugin(bb: BbPluginApi) {
     repeats: number;
   }) {
     const c = await cfg();
-    const result = await runVariaq(c, [
+    const args = [
       "benchmark", input.problemId,
       "--solvers", input.solvers.join(","),
       "--seed", String(input.seed),
       "--repeats", String(input.repeats),
-    ]);
-    const runIds = extractRunIds(result.stdout);
-    const runs = await Promise.all(runIds.map(async (runId) => (await opRun(runId)).run));
+    ];
+    const result = await runVariaqJson(c, args);
+    const envelope = result.envelope;
+    const { data, warnings } = successData<BenchmarkEnvelopeData>(envelope, "benchmark");
+    const runIds = data.runs.map((run) => run.run_id);
     return {
-      exitCode: result.timedOut ? -1 : result.code,
+      exitCode: result.code,
       timedOut: result.timedOut,
+      status: envelope.status,
       runIds,
-      runs,
-      stderr: result.stderr.trim() || null,
-      stdout: result.stdout,
+      runs: data.runs,
+      comparison: data.comparison,
+      error: result.code !== 0 ? envelope.error : undefined,
+      warnings,
+      stderr: null,
     };
   }
 
   async function opCompareQuantum(input: { problemId: string; p: number; repeats: number }) {
     const c = await cfg();
-    const result = await runVariaq(c, [
+    const args = [
       "compare", "quantum", input.problemId,
       "--p", String(input.p),
       "--repeats", String(input.repeats),
-    ]);
-    const runIds = extractRunIds(result.stdout);
-    const runs = await Promise.all(runIds.map(async (runId) => (await opRun(runId)).run));
-    // The human "Matched quantum detail" block is a presentation summary of the
-    // persisted per-solver runs; do not parse that presentation text. Return
-    // the persisted records resolved from the stable run-id tokens instead.
+    ];
+    const result = await runVariaqJson(c, args);
+    const envelope = result.envelope;
+    const { data, warnings } = successData<CompareQuantumEnvelopeData>(envelope, "compare quantum");
+    const runIds = data.runs.map((run) => run.run_id);
     return {
-      exitCode: result.timedOut ? -1 : result.code,
+      exitCode: result.code,
       timedOut: result.timedOut,
+      status: envelope.status,
       runIds,
-      runs,
-      stderr: result.stderr.trim() || null,
-      stdout: result.stdout,
+      runs: data.runs,
+      comparison: data.comparison,
+      error: result.code !== 0 ? envelope.error : undefined,
+      warnings,
+      stderr: null,
     };
   }
 
   async function opRuns(limit: number) {
     const c = await cfg();
-    const result = await runVariaqStrict(c, ["runs", "list", "--limit", String(limit)], {
+    const result = await runVariaqJson(c, ["runs", "list", "--limit", String(limit)], {
       timeoutMs: 15_000,
     });
-    if (result.stdout.trim() === "No experiment runs recorded.") {
-      return { runs: [] as z.infer<typeof runListRowSchema>[] };
-    }
+    const envelope = requireSuccess(result, ["runs", "list"]);
+    const { data, warnings } = successData<unknown[]>(envelope, "runs list");
     return {
-      runs: z.array(runListRowSchema).parse(parseJsonOutput(result.stdout, "runs list")),
+      runs: data as Record<string, unknown>[],
+      warnings,
     };
   }
 
   async function opRun(runId: string) {
     const c = await cfg();
-    const result = await runVariaqStrict(c, ["runs", "show", runId], { timeoutMs: 15_000 });
-    return { run: parseJsonOutput(result.stdout, "runs show") };
+    const result = await runVariaqJson(c, ["runs", "show", runId], { timeoutMs: 15_000 });
+    const envelope = requireSuccess(result, ["runs", "show", runId]);
+    const { data, warnings } = successData<Record<string, unknown>>(envelope, "runs show");
+    return { run: data, warnings };
   }
 
   async function opReproduce(runId: string) {
     const c = await cfg();
-    const result = await runVariaq(c, ["runs", "reproduce", runId]);
-    const newRunId = extractRunId(result.stdout);
-    const { run } = newRunId !== null ? await opRun(newRunId) : { run: null };
+    const result = await runVariaqJson(c, ["runs", "reproduce", runId]);
+    const envelope = result.envelope;
+    const { data, warnings } = successData<ReproduceEnvelopeData>(envelope, "runs reproduce");
     return {
-      exitCode: result.timedOut ? -1 : result.code,
+      exitCode: result.code,
       timedOut: result.timedOut,
-      runId: newRunId,
-      run,
-      stderr: result.stderr.trim() || null,
-      stdout: result.stdout,
+      runId: data.new_run_id,
+      originalRunId: data.original_run_id,
+      rerunOf: data.rerun_of,
+      lineage: data.lineage,
+      environmentDifferences: data.environment_differences,
+      run: data.new.result,
+      error: result.code !== 0 ? envelope.error : undefined,
+      warnings,
+      stderr: null,
     };
   }
 
@@ -502,7 +474,7 @@ export default async function plugin(bb: BbPluginApi) {
     async execute({ nodes, edgeProbability, seed }) {
       try {
         const result = await opProblemGenerate({ nodes, edgeProbability, seed });
-        return JSON.stringify({ problemId: result.problemId, output: result.stdout.trim() }, null, 2);
+        return JSON.stringify({ problemId: result.problemId, data: result.data, warnings: result.warnings }, null, 2);
       } catch (err) {
         return errorResult(err);
       }
@@ -518,8 +490,8 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute({ problemId }) {
       try {
-        const { problem } = await opProblemShow(problemId);
-        return JSON.stringify(problem, null, 2);
+        const { problem, warnings } = await opProblemShow(problemId);
+        return JSON.stringify({ problem, warnings }, null, 2);
       } catch (err) {
         return errorResult(err);
       }
@@ -549,20 +521,7 @@ export default async function plugin(bb: BbPluginApi) {
           seed: seed ?? 0,
           params: Object.entries(params ?? {}).map(([k, v]) => [k, String(v)] as [string, string]),
         });
-        if (result.exitCode !== 0 || result.timedOut) {
-          return JSON.stringify(
-            {
-              error: result.timedOut
-                ? "timeout"
-                : (result.stderr ?? `variaq solve exited ${result.exitCode}`),
-              runId: result.runId,
-              run: result.run,
-            },
-            null,
-            2,
-          );
-        }
-        return JSON.stringify({ runId: result.runId, run: result.run }, null, 2);
+        return JSON.stringify(result, null, 2);
       } catch (err) {
         return errorResult(err);
       }
@@ -571,7 +530,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "variaq_benchmark",
-    description: "Compare several VariaQ solvers on one problem. Returns run ids and the VariaQ comparison table.",
+    description: "Compare several VariaQ solvers on one problem. Returns run ids and the VariaQ comparison structure.",
     instructions: "Use variaq_benchmark to compare exact vs heuristic vs qaoa (and cudaq-* when available) on the same problem.",
     parameters: z.object({
       problemId: z.string().min(1).describe("Problem id"),
@@ -587,18 +546,7 @@ export default async function plugin(bb: BbPluginApi) {
           seed: seed ?? 0,
           repeats: repeats ?? 1,
         });
-        return JSON.stringify(
-          {
-            exitCode: result.exitCode,
-            timedOut: result.timedOut,
-            runIds: result.runIds,
-            runs: result.runs,
-            stderr: result.stderr,
-            table: result.stdout,
-          },
-          null,
-          2,
-        );
+        return JSON.stringify(result, null, 2);
       } catch (err) {
         return errorResult(err);
       }
@@ -608,7 +556,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "variaq_compare_quantum",
     description:
-      "Run VariaQ's matched Qiskit/CUDA-Q QAOA comparison on one problem. Returns the per-solver run ids (resolvable via variaq_run_show) plus VariaQ's comparison output.",
+      "Run VariaQ's matched Qiskit/CUDA-Q QAOA comparison on one problem. Returns the per-solver run records and the matched comparison structure.",
     instructions:
       "Use variaq_compare_quantum to compare matched QAOA implementations. CUDA-Q solvers require VariaQ's 'cudaq' extra.",
     parameters: z.object({
@@ -619,19 +567,7 @@ export default async function plugin(bb: BbPluginApi) {
     async execute({ problemId, p, repeats }) {
       try {
         const result = await opCompareQuantum({ problemId, p: p ?? 1, repeats: repeats ?? 1 });
-        if (result.exitCode !== 0 || result.timedOut) {
-          return JSON.stringify(
-            {
-              error: result.timedOut ? "timeout" : (result.stderr ?? `compare exited ${result.exitCode}`),
-              runIds: result.runIds,
-              runs: result.runs,
-              output: result.stdout,
-            },
-            null,
-            2,
-          );
-        }
-        return JSON.stringify({ runIds: result.runIds, runs: result.runs, output: result.stdout }, null, 2);
+        return JSON.stringify(result, null, 2);
       } catch (err) {
         return errorResult(err);
       }
@@ -647,7 +583,8 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute({ limit }) {
       try {
-        return JSON.stringify(await opRuns(limit ?? 20), null, 2);
+        const { runs, warnings } = await opRuns(limit ?? 20);
+        return JSON.stringify({ runs, warnings }, null, 2);
       } catch (err) {
         return errorResult(err);
       }
@@ -663,8 +600,8 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute({ runId }) {
       try {
-        const { run } = await opRun(runId);
-        return JSON.stringify(run, null, 2);
+        const { run, warnings } = await opRun(runId);
+        return JSON.stringify({ run, warnings }, null, 2);
       } catch (err) {
         return errorResult(err);
       }
@@ -681,18 +618,7 @@ export default async function plugin(bb: BbPluginApi) {
     async execute({ runId }) {
       try {
         const result = await opReproduce(runId);
-        if (result.exitCode !== 0 || result.timedOut) {
-          return JSON.stringify(
-            {
-              error: result.timedOut ? "timeout" : (result.stderr ?? `reproduce exited ${result.exitCode}`),
-              runId: result.runId,
-              run: result.run,
-            },
-            null,
-            2,
-          );
-        }
-        return JSON.stringify({ runId: result.runId, run: result.run }, null, 2);
+        return JSON.stringify(result, null, 2);
       } catch (err) {
         return errorResult(err);
       }
@@ -772,6 +698,34 @@ function parseInteger(raw: string, name: string): number {
   return Number.parseInt(raw, 10);
 }
 
+function successData<T>(
+  envelope: import("./lib/schema.js").ParsedEnvelope,
+  command: string,
+): { data: T; warnings: import("./lib/schema.js").StructuredWarning[] } {
+  const unwrapped = unwrapEnvelope<T>(envelope, command);
+  return { data: unwrapped.data, warnings: unwrapped.warnings };
+}
+
+function unwrapEnvelope<T = unknown>(
+  envelope: import("./lib/schema.js").ParsedEnvelope,
+  command: string,
+): {
+  status: import("./lib/schema.js").EnvelopeStatus;
+  data: T;
+  error: import("./lib/schema.js").StructuredError | undefined;
+  warnings: import("./lib/schema.js").StructuredWarning[];
+} {
+  if (envelope.command !== command && envelope.command !== `${command} json`) {
+    // Future VariaQ releases may append qualifiers; warn, do not hard-fail.
+  }
+  return {
+    status: envelope.status,
+    data: envelope.data as T,
+    error: envelope.error,
+    warnings: envelope.warnings,
+  };
+}
+
 /** Human-readable default for the CLI; full JSON under --json. */
 function formatCliOutput(value: unknown, json: boolean): string {
   if (json) return JSON.stringify(value, null, 2);
@@ -783,17 +737,20 @@ function formatCliOutput(value: unknown, json: boolean): string {
       variaq: {
         installed: boolean;
         version: string | null;
+        schema_version: string | null;
         python: string;
         resolvedFrom: string;
         compatibility: { warning: string | null };
       };
       solvers: Record<string, string>;
-      cudaq: Record<string, string | boolean>;
+      frameworks: Record<string, unknown>;
+      physical_qpu: Record<string, unknown>;
     };
     const lines: string[] = [
       `VariaQ:`,
       `  installed: ${status.variaq.installed ? "yes" : "no"}`,
       `  version: ${status.variaq.version ?? "unknown"}`,
+      `  schema_version: ${status.variaq.schema_version ?? "unknown"}`,
       `  python: ${status.variaq.python}`,
       `  resolved from: ${status.variaq.resolvedFrom}`,
       ...(status.variaq.compatibility.warning === null
@@ -803,8 +760,11 @@ function formatCliOutput(value: unknown, json: boolean): string {
       `Solvers:`,
       ...Object.entries(status.solvers).map(([name, s]) => `  ${name}: ${s}`),
       ``,
-      `CUDA-Q:`,
-      ...Object.entries(status.cudaq).map(([k, v]) => `  ${k}: ${String(v)}`),
+      `Frameworks:`,
+      ...Object.entries(status.frameworks).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
+      ``,
+      `Physical QPU:`,
+      ...Object.entries(status.physical_qpu).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
     ];
     return lines.join("\n");
   }
@@ -816,24 +776,14 @@ function formatCliOutput(value: unknown, json: boolean): string {
       ? `${String(record.stdout).trimEnd()}\nWarning: ${warning}`
       : String(record.stdout).trimEnd();
   }
-  if ("problemId" in record && "stdout" in record) return String(record.stdout).trimEnd();
+  if ("problemId" in record) return JSON.stringify(record, null, 2);
   if ("problem" in record) return JSON.stringify(record.problem, null, 2);
 
   if ("runId" in record && "run" in record) {
-    const parts: string[] = [];
-    if (record.runId !== null) parts.push(`run_id=${String(record.runId)}`);
-    const run = record.run as Record<string, unknown> | null;
-    const result = run?.result as Record<string, unknown> | undefined;
-    if (result !== undefined) {
-      parts.push(
-        `solver=${String(result.solver_name)} status=${String(result.status)} objective=${String(result.objective)}`,
-      );
-    }
-    if (typeof record.stderr === "string" && record.stderr) parts.push(`stderr: ${record.stderr}`);
-    return parts.length > 0 ? parts.join("\n") : JSON.stringify(value, null, 2);
+    return JSON.stringify(value, null, 2);
   }
 
-  if ("runIds" in record && "stdout" in record) return String(record.stdout).trimEnd();
+  if ("runIds" in record) return JSON.stringify(value, null, 2);
   if ("runs" in record) return JSON.stringify(record.runs, null, 2);
 
   return JSON.stringify(value, null, 2);
