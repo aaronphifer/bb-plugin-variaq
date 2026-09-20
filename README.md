@@ -33,14 +33,14 @@ execution, and structured result forwarding.
 - BB 0.43.x with Plugin SDK 0.4.104
 - Node.js 22.19 or a compatible version supported by BB
 - Linux-native Python 3.12
-- a separate VariaQ 0.3.x installation; 0.3.0 is the verified version
+- a separate VariaQ 0.4.x installation; 0.4.0 is the verified version
 
 Create a VariaQ environment separately from this repository:
 
 ```bash
 git clone https://github.com/aaronphifer/variaq.git
 cd variaq
-git checkout v0.3.0  # VariaQ 0.3.0
+git checkout v0.4.0  # VariaQ 0.4.0
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -e '.[quantum]'
 ```
@@ -140,14 +140,14 @@ parsing or run-ID scraping.
 The verified combination is:
 
 ```text
-bb-plugin-variaq 0.2.0
-VariaQ           0.3.0
+bb-plugin-variaq 0.3.0
+VariaQ           0.4.0
 Plugin SDK       0.4.104
 BB host          0.43.x
 VariaQ schema    1
 ```
 
-bb-plugin-variaq 0.2.x is verified against VariaQ 0.3.x and schema version `1`.
+bb-plugin-variaq 0.3.x is verified against VariaQ 0.4.x and schema version `1`.
 Patch releases within the 0.3 series are accepted. Other VariaQ series or future
 schema versions are reported as unsupported with a clear compatibility error.
 
@@ -169,7 +169,7 @@ requirement or assumption.
 
 ## Limitations
 
-- VariaQ 0.3.0 provides local execution only; there is no physical-QPU path.
+- VariaQ 0.4.0 provides local execution only; there is no physical-QPU path.
 - There is no IBM Runtime/provider integration and no credential handling.
 - Generic CI does not require CUDA-Q, an NVIDIA GPU, a physical QPU, or remote
   services.
@@ -216,7 +216,7 @@ npm run test:integration
 ```
 
 The normal GitHub Actions plugin job uses the deterministic fake CLI. A
-separate Linux integration job checks out the immutable VariaQ `v0.3.0` tag,
+separate Linux integration job checks out the immutable VariaQ `v0.4.0` tag,
 installs `.[quantum]`, and exercises local classical/Qiskit workflows.
 CUDA-Q and GPU verification remain manual or suitable for a future self-hosted
 runner.
@@ -238,3 +238,33 @@ expects valid schema-v1 JSON on stdout; malformed output produces a clear
 integration error with bounded excerpts instead of heuristic recovery.
 
 Error responses do not include the subprocess environment.
+
+## VariaQ problem families
+
+Starting with bb-plugin-variaq 0.3.0, the plugin exposes VariaQ 0.4's generic
+problem families:
+
+- **MaxCut** — partition graph nodes to maximize cut weight.
+- **Assignment** — assign generic tasks to resources with scores/costs, optional
+  prohibited pairs, capacities, and demands.
+- **Subset Selection** — choose candidates with values/costs, optional budget,
+  cardinality bounds, and pairwise interactions.
+- **Graph Partitioning** — partition a weighted graph with optional balance
+  constraints.
+
+The plugin remains a thin adapter: it does not understand external project
+semantics. A downstream domain adapter translates project objects into these
+generic families and maps results back:
+
+```text
+domain project
+     ↓
+domain adapter
+     ↓
+VariaQ generic problem
+     ↑
+     │
+bb-plugin-variaq
+```
+
+Project-specific adapters live outside this plugin.
