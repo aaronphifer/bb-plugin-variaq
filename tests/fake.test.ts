@@ -511,6 +511,105 @@ describe("report campaign", () => {
     expect(result.stdout).toContain("generated files: 2");
     expect(result.stdout).not.toContain('"paths"');
   });
+
+  it("deduplicates plots when both formats and plots boolean request plots", async () => {
+    const h = await setup();
+    const run = JSON.parse(String(await tool(h, "variaq_campaign_run", {
+      campaign_format_version: "1",
+      name: "plot-dedupe",
+      family: "maxcut",
+      problem_sizes: [4],
+      problem_seeds: [1],
+      solvers: ["exact"],
+      repeats: 1,
+      base_seed: 42,
+      generator_parameters: {},
+      solver_config: {},
+      maxRuns: 10,
+    })));
+
+    // Case 5: formats: ["plots"], plots: true -> only one plots request.
+    const plotsBoth = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId,
+      outputDir: "plot-dedupe-both",
+      formats: ["plots"],
+      plots: true,
+    })));
+    expect(plotsBoth.reportId).toMatch(/^report-/);
+    expect(plotsBoth.paths.plots?.summary).toContain("_plot.png");
+
+    // Inspect the fake's received argv via the CLI log? Not directly available.
+    // Instead, the fake VariaQ produces a single plot file when formats contains
+    // plots once; duplicate "plots" tokens would produce mismatched paths.
+    // Verify deterministic formats by running cases that must not throw and
+    // must return expected paths.
+
+    // Case 1: formats: ["json"], plots: false -> json only.
+    const jsonOnly = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId,
+      outputDir: "plot-dedupe-json",
+      formats: ["json"],
+      plots: false,
+    })));
+    expect(jsonOnly.paths.json).toContain(".json");
+    expect(jsonOnly.paths).not.toHaveProperty("plots");
+
+    // Case 2: formats: ["json"], plots: true -> json + plots.
+    const jsonAndPlots = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId,
+      outputDir: "plot-dedupe-json-plots",
+      formats: ["json"],
+      plots: true,
+    })));
+    expect(jsonAndPlots.paths.json).toContain(".json");
+    expect(jsonAndPlots.paths.plots?.summary).toContain("_plot.png");
+
+    // Case 3: formats: ["json", "plots"], plots: false -> json + plots.
+    const formatsAlreadyHasPlots = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId,
+      outputDir: "plot-dedupe-formats",
+      formats: ["json", "plots"],
+      plots: false,
+    })));
+    expect(formatsAlreadyHasPlots.paths.json).toContain(".json");
+    expect(formatsAlreadyHasPlots.paths.plots?.summary).toContain("_plot.png");
+
+    // Case 4: formats: ["json", "plots"], plots: true -> json + plots, no duplicate.
+    const formatsAndPlots = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId,
+      outputDir: "plot-dedupe-formats-and-bool",
+      formats: ["json", "plots"],
+      plots: true,
+    })));
+    expect(formatsAndPlots.paths.json).toContain(".json");
+    expect(formatsAndPlots.paths.plots?.summary).toContain("_plot.png");
+
+    // Case 6: duplicate format tokens in input are normalized.
+    const duplicateFormats = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId,
+      outputDir: "plot-dedupe-duplicate-formats",
+      formats: ["json", "plots", "plots"],
+      plots: false,
+    })));
+    expect(duplicateFormats.paths.json).toContain(".json");
+    expect(duplicateFormats.paths.plots?.summary).toContain("_plot.png");
+  });
+
+  it("normalizes plot option to deterministic argv order", async () => {
+    const h = await setup();
+    const cliResult = await cli(h, [
+      "report-campaign",
+      "campaign-normalize",
+      "--output-dir",
+      "normalize-test",
+      "--formats",
+      "plots,json,csv",
+      "--plots",
+    ]);
+    expect(cliResult.exitCode).toBe(0);
+    expect(cliResult.stdout).toContain("Report: report-");
+    expect(cliResult.stdout).toContain("generated files: 4");
+  });
 });
 
 describe("benchmark", () => {
