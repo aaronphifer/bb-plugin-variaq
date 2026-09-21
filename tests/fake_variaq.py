@@ -2,7 +2,7 @@
 """
 Deterministic stand-in for the VariaQ CLI used by bb-plugin-variaq tests.
 
-Emulates VariaQ 0.4.0 schema-v1 envelopes so tests can verify the plugin's
+Emulates VariaQ 0.5.0 schema-v1 envelopes so tests can verify the plugin's
 JSON contract without touching a real VariaQ install or solver.
 
 Recognized argv shape:
@@ -18,7 +18,8 @@ OUTPUT_SCHEMA_VERSION = "1"
 
 FAMILIES = ["maxcut", "assignment", "subset-selection", "graph-partition"]
 CLASSICAL_FAMILIES = FAMILIES
-QUANTUM_FAMILIES = ["maxcut"]
+# VariaQ 0.5 advertises these quantum families dynamically; the fake mirrors that.
+QUANTUM_FAMILIES = ["maxcut", "assignment", "subset-selection"]
 
 
 def envelope(command, status, data, warnings=None, error=None):
@@ -37,6 +38,14 @@ def envelope(command, status, data, warnings=None, error=None):
 
 def fake_run_id():
     return f"run-{uuid.uuid4()}"
+
+
+def supported_family(family):
+    return family in FAMILIES
+
+
+def quantum_supported_family(family):
+    return family in QUANTUM_FAMILIES
 
 
 def main(argv):
@@ -131,7 +140,7 @@ def main(argv):
                 "supported": False,
                 "installed": False,
                 "available": False,
-                "reason": "Physical QPU execution is not supported in VariaQ 0.4.0",
+                "reason": "Physical QPU execution is not supported in this release",
             },
             "warnings": warnings,
         })))
@@ -241,6 +250,78 @@ def main(argv):
         print(json.dumps(envelope("problem show", "success", data)))
         return 0
 
+    def detect_family_from_problem_id(problem):
+        family = "maxcut"
+        for f in FAMILIES:
+            if problem.startswith(f"{f}-"):
+                family = f
+                break
+        return family
+
+    def make_run(problem, solver, seed, family=None):
+        if family is None:
+            family = detect_family_from_problem_id(problem)
+        sense = "minimize" if family == "graph-partition" else "maximize"
+        objective = 7.0 if sense == "maximize" else 3.0
+        is_quantum = solver in ("qaoa", "cudaq-cpu", "cudaq-gpu")
+        run_id = fake_run_id()
+        run = {
+            "run_id": run_id,
+            "problem_id": problem,
+            "problem_type": family,
+            "family": family,
+            "solver": solver,
+            "backend": "fake" if solver in ("exact", "heuristic", "qaoa") else ("qpp-cpu" if solver == "cudaq-cpu" else "nvidia"),
+            "backend_type": "classical_cpu" if solver in ("exact", "heuristic") else "quantum_simulator",
+            "status": "success",
+            "solution": [0, 0, 1, 1, 1, 1],
+            "objective": objective,
+            "best_known_objective": objective,
+            "best_known_source": "exact_optimum",
+            "optimality_gap_percent": 0.0,
+            "approximation_ratio": 1.0,
+            "feasible": True,
+            "constraint_violations": [],
+            "wall_time_seconds": 0.001,
+            "solver_time_seconds": 0.001,
+            "seed": seed,
+            "parameters": {},
+            "qaoa_depth": 1 if is_quantum else None,
+            "shots": 64 if is_quantum else None,
+            "optimizer_trials": 4 if is_quantum else None,
+            "candidate_parameter_digest": "abc123" if is_quantum else None,
+            "selected_parameter_index": 0 if is_quantum else None,
+            "selected_parameters": ({"beta": [0.1], "gamma": [0.2]} if is_quantum else None),
+            "expectation": -42.135 if is_quantum else None,
+            "lowered_energy": -42.135 if is_quantum else None,
+            "qubit_count": 6 if is_quantum else None,
+            "binary_variable_count": 6 if is_quantum else None,
+            "logical_variable_count": 6 if is_quantum else None,
+            "auxiliary_variable_count": 0 if is_quantum else None,
+            "circuit_depth": 12 if is_quantum else None,
+            "gate_count": 24 if is_quantum else None,
+            "logical_gate_count": 24 if is_quantum else None,
+            "precision": "fp64" if solver.startswith("cudaq") else None,
+            "backend_metadata": {"name": "fake", "backend_type": "classical_cpu" if solver in ("exact", "heuristic") else "quantum_simulator", "is_local": True},
+            "environment": {"packages": {"variaq": os.environ.get("FAKE_VARIAQ_VERSION", "9.9.9")}},
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "sense": sense,
+        }
+        if is_quantum:
+            run["feasible_sample_count"] = 22
+            run["infeasible_sample_count"] = 234
+            run["bqm"] = {
+                "digest": "sha256-deadbeef",
+                "variable_count": 6,
+                "linear_term_count": 6,
+                "quadratic_term_count": 8,
+            }
+            run["penalties"] = [
+                {"name": "capacity", "weight": 2.0, "violated": False, "contribution": 0.0},
+            ]
+            run["timing"] = {"compile": 0.01, "execute": 0.05, "optimize": 0.02}
+        return run
+
     if cmd == "solve":
         problem = args[1] if len(args) > 1 else "missing"
         solver = "exact"
@@ -260,11 +341,7 @@ def main(argv):
                 "message": f"Problem not found: {problem}",
             })))
             return 2
-        family = "maxcut"
-        for f in FAMILIES:
-            if problem.startswith(f"{f}-"):
-                family = f
-                break
+        family = detect_family_from_problem_id(problem)
         cudaq_mode = os.environ.get("FAKE_CUDAQ", "unavailable")
         cudaq_available = cudaq_mode in ("available", "driver-down")
         nvidia_available = cudaq_available and cudaq_mode == "available"
@@ -302,7 +379,7 @@ def main(argv):
                 "run_id": run_id,
             })))
             return 1
-        if solver in ("qaoa", "cudaq-cpu", "cudaq-gpu") and family != "maxcut":
+        if solver in ("qaoa", "cudaq-cpu", "cudaq-gpu") and not quantum_supported_family(family):
             run_id = fake_run_id()
             print(json.dumps(envelope("solve", "error", {
                 "run_id": run_id,
@@ -315,7 +392,7 @@ def main(argv):
                 "objective": None,
             }, error={
                 "type": "ValidationError",
-                "message": f"The {solver} solver supports MaxCut only",
+                "message": f"Solver '{solver}' does not support problem family '{family}'; supported families: {', '.join(QUANTUM_FAMILIES)}.",
                 "run_id": run_id,
             })))
             return 1
@@ -330,52 +407,16 @@ def main(argv):
                 "backend_type": "unavailable",
                 "status": "failed",
                 "objective": None,
+                "feasible_sample_count": 0,
+                "infeasible_sample_count": 256,
             }, error={
                 "type": "MissingOptionalDependency",
                 "message": "simulated solver failure",
                 "run_id": run_id,
             })))
             return 1
-        run_id = fake_run_id()
-        sense = "minimize" if family == "graph-partition" else "maximize"
-        objective = 7.0 if sense == "maximize" else 3.0
-        print(json.dumps(envelope("solve", "success", {
-            "run_id": run_id,
-            "problem_id": problem,
-            "problem_type": family,
-            "family": family,
-            "solver": solver,
-            "backend": "fake",
-            "backend_type": "classical_cpu" if solver in ("exact", "heuristic") else "quantum_simulator",
-            "status": "success",
-            "solution": [0, 0, 1, 1, 1, 1],
-            "objective": objective,
-            "best_known_objective": objective,
-            "best_known_source": "exact_optimum",
-            "optimality_gap_percent": 0.0,
-            "approximation_ratio": 1.0,
-            "feasible": True,
-            "constraint_violations": [],
-            "wall_time_seconds": 0.001,
-            "solver_time_seconds": 0.001,
-            "seed": seed,
-            "parameters": {},
-            "qaoa_depth": None,
-            "shots": None,
-            "optimizer_trials": None,
-            "candidate_parameter_digest": None,
-            "selected_parameter_index": None,
-            "selected_parameters": None,
-            "expectation": None,
-            "qubit_count": None,
-            "circuit_depth": None,
-            "gate_count": None,
-            "logical_gate_count": None,
-            "backend_metadata": {"name": "fake", "backend_type": "classical_cpu", "is_local": True},
-            "environment": {"packages": {"variaq": os.environ.get("FAKE_VARIAQ_VERSION", "9.9.9")}},
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "sense": sense,
-        })))
+        run = make_run(problem, solver, seed, family)
+        print(json.dumps(envelope("solve", "success", run)))
         return 0
 
     if cmd == "benchmark":
@@ -384,18 +425,18 @@ def main(argv):
             if a == "--solvers" and i + 1 < len(args):
                 solvers = [s.strip() for s in args[i + 1].split(",") if s.strip()]
         problem = args[1] if len(args) > 1 else "maxcut-fake000000001"
-        family = "maxcut"
-        for f in FAMILIES:
-            if problem.startswith(f"{f}-"):
-                family = f
-                break
+        seed = int(value("--seed", "0"))
+        family = detect_family_from_problem_id(problem)
         sense = "minimize" if family == "graph-partition" else "maximize"
         objective = 7.0 if sense == "maximize" else 3.0
         runs = []
         failed = 0
         unavailable = 0
+        cudaq_mode = os.environ.get("FAKE_CUDAQ", "unavailable")
+        cudaq_available = cudaq_mode in ("available", "driver-down")
+        nvidia_available = cudaq_available and cudaq_mode == "available"
         for solver in solvers:
-            if solver in ("qaoa", "cudaq-cpu", "cudaq-gpu") and family != "maxcut":
+            if solver in ("qaoa", "cudaq-cpu", "cudaq-gpu") and not quantum_supported_family(family):
                 runs.append({
                     "run_id": fake_run_id(),
                     "problem_id": problem,
@@ -414,36 +455,62 @@ def main(argv):
                     "constraint_violations": [],
                     "wall_time_seconds": 0.0,
                     "solver_time_seconds": 0.0,
-                    "seed": 0,
+                    "seed": seed,
                     "parameters": {},
                 })
                 failed += 1
                 unavailable += 1
-            else:
+            elif solver in ("cudaq-cpu", "cudaq-gpu") and not cudaq_available:
                 runs.append({
                     "run_id": fake_run_id(),
                     "problem_id": problem,
                     "problem_type": family,
                     "solver": solver,
-                    "backend": "fake",
-                    "backend_type": "classical_cpu",
-                    "status": "success",
-                    "solution": [0, 0, 1, 1, 1, 1],
-                    "objective": objective,
+                    "backend": "not-executed",
+                    "backend_type": "unavailable",
+                    "status": "failed",
+                    "solution": None,
+                    "objective": None,
                     "best_known_objective": objective,
-                    "best_known_source": "exact_optimum",
-                    "optimality_gap_percent": 0.0,
-                    "approximation_ratio": 1.0,
-                    "feasible": True,
+                    "best_known_source": "stored_exact_optimum",
+                    "optimality_gap_percent": None,
+                    "approximation_ratio": None,
+                    "feasible": False,
                     "constraint_violations": [],
-                    "wall_time_seconds": 0.001,
-                    "solver_time_seconds": 0.001,
-                    "seed": 0,
+                    "wall_time_seconds": 0.0,
+                    "solver_time_seconds": 0.0,
+                    "seed": seed,
                     "parameters": {},
-                    "backend_metadata": {"name": "fake", "backend_type": "classical_cpu", "is_local": True},
-                    "environment": {},
-                    "created_at": "2026-01-01T00:00:00+00:00",
                 })
+                failed += 1
+                unavailable += 1
+            elif solver == "cudaq-gpu" and not nvidia_available:
+                runs.append({
+                    "run_id": fake_run_id(),
+                    "problem_id": problem,
+                    "problem_type": family,
+                    "solver": solver,
+                    "backend": "not-executed",
+                    "backend_type": "unavailable",
+                    "status": "failed",
+                    "solution": None,
+                    "objective": None,
+                    "best_known_objective": objective,
+                    "best_known_source": "stored_exact_optimum",
+                    "optimality_gap_percent": None,
+                    "approximation_ratio": None,
+                    "feasible": False,
+                    "constraint_violations": [],
+                    "wall_time_seconds": 0.0,
+                    "solver_time_seconds": 0.0,
+                    "seed": seed,
+                    "parameters": {},
+                })
+                failed += 1
+                unavailable += 1
+            else:
+                run = make_run(problem, solver, seed, family)
+                runs.append(run)
         aggregate = "success" if failed == 0 else "partial"
         print(json.dumps(envelope("benchmark", aggregate, {
             "problem": {
@@ -469,77 +536,57 @@ def main(argv):
 
     if cmd == "compare":
         problem = args[2] if len(args) > 2 else "maxcut-fake000000001"
-        family = "maxcut"
-        for f in FAMILIES:
-            if problem.startswith(f"{f}-"):
-                family = f
-                break
-        if family != "maxcut":
+        family = detect_family_from_problem_id(problem)
+        sense = "maximize" if family != "graph-partition" else "minimize"
+        objective = 7.0 if sense == "maximize" else 3.0
+        p = int(value("--p", "1"))
+        repeats = int(value("--repeats", "1"))
+        if not quantum_supported_family(family):
             print(json.dumps(envelope("compare quantum", "error", None, error={
                 "type": "ValidationError",
-                "message": f"compare quantum supports MaxCut only; got {family}",
+                "message": f"compare quantum has no available quantum solvers for problem family '{family}'",
             })))
             return 1
         solvers = ["qaoa", "cudaq-cpu"]
         for i, a in enumerate(args):
             if a == "--solvers" and i + 1 < len(args):
                 solvers = [s.strip() for s in args[i + 1].split(",") if s.strip()]
-        p = 1
-        for i, a in enumerate(args):
-            if a == "--p" and i + 1 < len(args):
-                p = int(args[i + 1])
-        repeats = 1
-        for i, a in enumerate(args):
-            if a == "--repeats" and i + 1 < len(args):
-                repeats = int(args[i + 1])
+        # If a selected solver does not support the family, reject cleanly.
+        for solver in solvers:
+            if solver in ("qaoa", "cudaq-cpu", "cudaq-gpu") and not quantum_supported_family(family):
+                print(json.dumps(envelope("compare quantum", "error", None, error={
+                    "type": "ValidationError",
+                    "message": f"compare quantum cannot include solver '{solver}': does not support problem family '{family}'; supported families: {', '.join(QUANTUM_FAMILIES)}",
+                })))
+                return 1
         runs = []
         for solver in solvers:
-            runs.append({
-                "run_id": fake_run_id(),
-                "problem_id": problem,
-                "problem_type": "maxcut",
-                "solver": solver,
-                "backend": "fake" if solver == "qaoa" else "qpp-cpu",
+            run = make_run(problem, solver, 42, family)
+            run["parameters"] = {"p": p, "optimizer_trials": 4, "shots": 64, "precision": "fp64" if solver.startswith("cudaq") else None}
+            run["backend_metadata"] = {
+                "name": "fake" if solver == "qaoa" else "qpp-cpu",
                 "backend_type": "quantum_simulator",
-                "status": "success",
-                "solution": [0, 0, 1, 1, 1, 1],
-                "objective": 7.0,
-                "best_known_objective": 7.0,
-                "best_known_source": "stored_exact_optimum",
-                "optimality_gap_percent": 0.0,
-                "approximation_ratio": 1.0,
-                "feasible": True,
-                "constraint_violations": [],
-                "wall_time_seconds": 0.001,
-                "solver_time_seconds": 0.001,
-                "seed": 42,
-                "parameters": {"p": p, "optimizer_trials": 4, "shots": 64, "precision": "fp64" if solver.startswith("cudaq") else None},
-                "backend_metadata": {
-                    "name": "fake" if solver == "qaoa" else "qpp-cpu",
-                    "backend_type": "quantum_simulator",
-                    "is_local": True,
-                    "metrics": {
-                        "candidate_parameter_digest": "abc123",
-                        "candidate_expectations": [3.8, 3.8],
-                        "best_parameter_index": 0,
-                    },
+                "is_local": True,
+                "metrics": {
+                    "candidate_parameter_digest": "abc123",
+                    "candidate_expectations": [3.8, 3.8],
+                    "best_parameter_index": 0,
                 },
-                "environment": {},
-                "created_at": "2026-01-01T00:00:00+00:00",
-            })
+            }
+            runs.append(run)
         print(json.dumps(envelope("compare quantum", "success", {
             "problem": {
                 "problem_id": problem,
-                "problem_type": "maxcut",
+                "problem_type": family,
                 "node_count": 6,
                 "edge_count": 8,
-                "family": "maxcut",
-                "sense": "maximize",
+                "family": family,
+                "sense": "maximize" if family != "graph-partition" else "minimize",
             },
             "runs": runs,
             "comparison": {
                 "aggregate_status": "success",
-                "best_known_objective": 7.0,
+                "best_known_objective": objective,
                 "best_known_source": "stored_exact_optimum",
                 "solver_count": len(runs),
                 "successful_count": len(runs),
@@ -608,6 +655,7 @@ def main(argv):
             })))
             return 2
         new_id = fake_run_id()
+        version = os.environ.get("FAKE_VARIAQ_VERSION", "0.5.0")
         print(json.dumps(envelope("runs reproduce", "success", {
             "original_run_id": rid,
             "new_run_id": new_id,
@@ -619,7 +667,7 @@ def main(argv):
                 "problem_id": "maxcut-fake000000001",
                 "seed": 42,
                 "parameters": {},
-                "environment": {"python_version": "3.12.3", "variaq_version": "0.4.0"},
+                "environment": {"python_version": "3.12.3", "variaq_version": version},
                 "result": {"status": "success", "objective": 7.0, "backend": "fake"},
             },
             "new": {
@@ -628,7 +676,7 @@ def main(argv):
                 "problem_id": "maxcut-fake000000001",
                 "seed": 42,
                 "parameters": {},
-                "environment": {"python_version": "3.12.3", "variaq_version": "0.4.0"},
+                "environment": {"python_version": "3.12.3", "variaq_version": version},
                 "result": {
                     "run_id": new_id,
                     "problem_id": "maxcut-fake000000001",

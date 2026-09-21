@@ -64,17 +64,27 @@ describe("status via fake CLI", () => {
     expect(status.solver_supported_families.exact).toEqual(
       expect.arrayContaining(["assignment", "graph-partition", "maxcut", "subset-selection"]),
     );
-    expect(status.solver_supported_families.qaoa).toEqual(["maxcut"]);
+    expect(status.solver_supported_families.qaoa).toEqual(
+      expect.arrayContaining(["maxcut", "assignment", "subset-selection"]),
+    );
     expect(status.solvers.exact).toBe("available");
     expect(status.solvers["cudaq-cpu"]).toBe("unavailable");
   });
 
-  it("accepts supported VariaQ 0.4 patch versions without a warning", async () => {
-    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.4.2");
+  it("accepts supported VariaQ 0.5 patch versions without a warning", async () => {
+    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.5.2");
     const h = await setup();
     const status = JSON.parse(String(await tool(h, "variaq_status", {})));
     expect(status.variaq.compatibility.supported).toBe(true);
     expect(status.variaq.compatibility.warning).toBeNull();
+  });
+
+  it("reports 0.4 series as unsupported", async () => {
+    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.4.2");
+    const h = await setup();
+    const status = JSON.parse(String(await tool(h, "variaq_status", {})));
+    expect(status.variaq.compatibility.supported).toBe(false);
+    expect(status.variaq.compatibility.warning).toMatch(/Unsupported VariaQ version 0\.4\.2/);
   });
 });
 
@@ -190,20 +200,87 @@ describe("solve via fake CLI", () => {
     expect(result.run.sense).toBe("minimize");
   });
 
-  it("pre-rejects qaoa on assignment", async () => {
+  it("allows qaoa on assignment in VariaQ 0.5", async () => {
     const h = await setup();
     const result = JSON.parse(String(
       await tool(h, "variaq_solve", { problemId: "assignment-fake000000001", solver: "qaoa" }),
     ));
-    expect(result.error?.type || result.error).toMatch(/ValidationError|does not support problem family|supports MaxCut only/i);
+    expect(result.run.status).toBe("success");
+    expect(result.run.problem_type).toBe("assignment");
+    expect(result.run.expectation).toBeDefined();
+    expect(result.run.feasible_sample_count).toBeGreaterThan(0);
+    expect(result.run.infeasible_sample_count).toBeGreaterThan(0);
   });
 
-  it("pre-rejects cudaq-cpu on subset-selection", async () => {
+  it("allows cudaq-cpu on subset-selection in VariaQ 0.5 when CUDA-Q is available", async () => {
+    vi.stubEnv("FAKE_CUDAQ", "available");
     const h = await setup();
     const result = JSON.parse(String(
       await tool(h, "variaq_solve", { problemId: "subset-selection-fake000000001", solver: "cudaq-cpu" }),
     ));
-    expect(result.error?.type || result.error).toMatch(/ValidationError|does not support problem family|supports MaxCut only/i);
+    expect(result.run.status).toBe("success");
+    expect(result.run.problem_type).toBe("subset-selection");
+  });
+
+  it("pre-rejects qaoa on graph-partition based on capabilities", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(
+      await tool(h, "variaq_solve", { problemId: "graph-partition-fake000000001", solver: "qaoa" }),
+    ));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.error?.message ?? String(result.error)).toMatch(/does not support problem family/);
+  });
+
+  it("pre-rejects cudaq-cpu on graph-partition based on capabilities", async () => {
+    vi.stubEnv("FAKE_CUDAQ", "available");
+    const h = await setup();
+    const result = JSON.parse(String(
+      await tool(h, "variaq_solve", { problemId: "graph-partition-fake000000001", solver: "cudaq-cpu" }),
+    ));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.error?.message ?? String(result.error)).toMatch(/does not support problem family/);
+  });
+
+  it("preserves expectation and objective as distinct fields", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(
+      await tool(h, "variaq_solve", { problemId: "assignment-fake000000001", solver: "qaoa" }),
+    ));
+    expect(result.run.status).toBe("success");
+    expect(result.run.objective).toBe(7);
+    expect(result.run.expectation).toBe(-42.135);
+    expect(result.run.lowered_energy).toBe(-42.135);
+  });
+
+  it("preserves BQM and penalty metadata on quantum runs", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(
+      await tool(h, "variaq_solve", { problemId: "subset-selection-fake000000001", solver: "qaoa" }),
+    ));
+    expect(result.run.bqm.digest).toBe("sha256-deadbeef");
+    expect(result.run.bqm.variable_count).toBe(6);
+    expect(result.run.penalties).toHaveLength(1);
+  });
+
+  it("does not treat nonzero infeasible samples as failure", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(
+      await tool(h, "variaq_solve", { problemId: "maxcut-fake000000001", solver: "qaoa" }),
+    ));
+    expect(result.run.status).toBe("success");
+    expect(result.run.feasible_sample_count).toBe(22);
+    expect(result.run.infeasible_sample_count).toBe(234);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("preserves no-feasible-sample failure from VariaQ", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(
+      await tool(h, "variaq_solve", { problemId: "fail1", solver: "qaoa" }),
+    ));
+    expect(result.exitCode).toBe(1);
+    expect(result.run.feasible_sample_count).toBe(0);
+    expect(result.run.infeasible_sample_count).toBe(256);
   });
 
   it("REGRESSION: VariaQ exit code 1 (solver failure) must stay non-zero", async () => {
@@ -237,27 +314,55 @@ describe("benchmark", () => {
   it("returns partial when a solver/family combination is unsupported", async () => {
     const h = await setup();
     const result = JSON.parse(String(
-      await tool(h, "variaq_benchmark", { problemId: "assignment-fake000000001", solvers: ["exact", "heuristic", "qaoa"] }),
+      await tool(h, "variaq_benchmark", { problemId: "graph-partition-fake000000001", solvers: ["exact", "heuristic", "qaoa"] }),
     ));
     expect(result.status).toBe("partial");
     expect(result.comparison.failed_count).toBe(1);
     expect(result.comparison.unavailable_count).toBe(1);
   });
+
+  it("returns success when assignment quantum solvers are supported", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(
+      await tool(h, "variaq_benchmark", { problemId: "assignment-fake000000001", solvers: ["exact", "heuristic", "qaoa"] }),
+    ));
+    expect(result.status).toBe("success");
+    expect(result.comparison.successful_count).toBe(3);
+  });
 });
 
 describe("compare quantum", () => {
-  it("rejects non-maxcut families", async () => {
+  it("rejects graph-partition because no quantum solver supports it", async () => {
     const h = await setup();
     const result = JSON.parse(String(
-      await tool(h, "variaq_compare_quantum", { problemId: "assignment-fake000000001" }),
+      await tool(h, "variaq_compare_quantum", { problemId: "graph-partition-fake000000001" }),
     ));
-    expect(result.error).toMatch(/compare quantum has no available quantum solvers for problem family 'assignment'/);
+    expect(result.error).toMatch(/compare quantum has no available quantum solvers for problem family 'graph-partition'/);
   });
 
   it("returns matched comparison for maxcut", async () => {
     const h = await setup();
     const result = JSON.parse(String(
       await tool(h, "variaq_compare_quantum", { problemId: "maxcut-fake000000001" }),
+    ));
+    expect(result.status).toBe("success");
+    expect(result.comparison.matched_qaoa).toBe(true);
+  });
+
+  it("returns matched comparison for assignment", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(
+      await tool(h, "variaq_compare_quantum", { problemId: "assignment-fake000000001" }),
+    ));
+    expect(result.status).toBe("success");
+    expect(result.comparison.matched_qaoa).toBe(true);
+    expect(result.runs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("returns matched comparison for subset-selection", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(
+      await tool(h, "variaq_compare_quantum", { problemId: "subset-selection-fake000000001" }),
     ));
     expect(result.status).toBe("success");
     expect(result.comparison.matched_qaoa).toBe(true);
@@ -300,8 +405,11 @@ describe("schema-v1 boundary via fake CLI", () => {
     const h = await setup();
     const result = JSON.parse(String(await tool(h, "variaq_status", {})));
     expect(result.solver_supported_families.qaoa).toContain("maxcut");
+    expect(result.solver_supported_families.qaoa).toContain("assignment");
+    expect(result.solver_supported_families.qaoa).toContain("subset-selection");
+    expect(result.solver_supported_families.qaoa).not.toContain("graph-partition");
     expect(result.solver_supported_families["cudaq-cpu"]).toContain("maxcut");
-    expect(result.solver_supported_families["cudaq-gpu"]).toContain("maxcut");
+    expect(result.solver_supported_families["cudaq-cpu"]).toContain("assignment");
     expect(result.solver_supported_families.exact).toContain("assignment");
   });
 
@@ -311,18 +419,18 @@ describe("schema-v1 boundary via fake CLI", () => {
     expect(result.run.status).toBe("success");
   });
 
-  it("qaoa + assignment is rejected before execution because capabilities says unsupported", async () => {
+  it("qaoa + graph-partition is rejected before execution because capabilities says unsupported", async () => {
     const h = await setup();
-    const result = JSON.parse(String(await tool(h, "variaq_solve", { problemId: "assignment-fake0000000001", solver: "qaoa" })));
+    const result = JSON.parse(String(await tool(h, "variaq_solve", { problemId: "graph-partition-fake0000000001", solver: "qaoa" })));
     expect(result.exitCode).not.toBe(0);
-    expect(result.error?.message ?? String(result.error)).toMatch(/does not support problem family|supports maxcut only/i);
+    expect(result.error?.message ?? String(result.error)).toMatch(/does not support problem family/);
   });
 
-  it("cudaq-cpu + subset-selection is rejected because capabilities says unsupported", async () => {
+  it("cudaq-cpu + subset-selection is accepted because capabilities says supported", async () => {
+    vi.stubEnv("FAKE_CUDAQ", "available");
     const h = await setup();
     const result = JSON.parse(String(await tool(h, "variaq_solve", { problemId: "subset-selection-fake000000001", solver: "cudaq-cpu" })));
-    expect(result.exitCode).not.toBe(0);
-    expect(result.error?.message ?? String(result.error)).toMatch(/does not support problem family|supports maxcut only/i);
+    expect(result.run.status).toBe("success");
   });
 
   it("cudaq backend unavailable is distinct from family unsupported", async () => {

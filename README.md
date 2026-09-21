@@ -15,8 +15,7 @@ VariaQ schema-v1 CLI
   ↓
 VariaQ
   ├── classical
-  ├── Qiskit
-  └── CUDA-Q
+  └── generic BQM-QAOA execution
 ```
 
 Starting with bb-plugin-variaq 0.2.0, the integration boundary is VariaQ's
@@ -33,14 +32,14 @@ execution, and structured result forwarding.
 - BB 0.43.x with Plugin SDK 0.4.104
 - Node.js 22.19 or a compatible version supported by BB
 - Linux-native Python 3.12
-- a separate VariaQ 0.4.x installation; 0.4.0 is the verified version
+- a separate VariaQ 0.5.x installation; 0.5.0 is the verified version
 
 Create a VariaQ environment separately from this repository:
 
 ```bash
 git clone https://github.com/aaronphifer/variaq.git
 cd variaq
-git checkout v0.4.0  # VariaQ 0.4.0
+git checkout v0.5.0  # VariaQ 0.5.0
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -e '.[quantum]'
 ```
@@ -51,7 +50,7 @@ The `quantum` extra supplies the local Qiskit workflow. CUDA-Q is optional:
 .venv/bin/python -m pip install -e '.[quantum,cudaq]'
 ```
 
-VariaQ 0.3.0 constrains CUDA-Q to `>=0.16,<0.17`; do not independently
+VariaQ 0.5.0 constrains CUDA-Q to `>=0.16,<0.17`; do not independently
 upgrade it beyond VariaQ's supported range.
 
 ## Installation
@@ -116,7 +115,7 @@ bb variaq status --json
 bb variaq version --json
 
 problem_json=$(bb variaq problem-generate \
-  --nodes 6 --edge-probability 0.5 --seed 42 --json)
+  maxcut --nodes 6 --edge-probability 0.5 --seed 42 --json)
 problem_id=$(printf '%s\n' "$problem_json" | jq -r '.problemId')
 
 bb variaq problem-show "$problem_id" --json
@@ -140,16 +139,17 @@ parsing or run-ID scraping.
 The verified combination is:
 
 ```text
-bb-plugin-variaq 0.3.0
-VariaQ           0.4.0
+bb-plugin-variaq 0.4.0
+VariaQ           0.5.0
 Plugin SDK       0.4.104
 BB host          0.43.x
 VariaQ schema    1
 ```
 
-bb-plugin-variaq 0.3.x is verified against VariaQ 0.4.x and schema version `1`.
-Patch releases within the 0.3 series are accepted. Other VariaQ series or future
-schema versions are reported as unsupported with a clear compatibility error.
+bb-plugin-variaq 0.4.x is verified against VariaQ 0.5.x and schema version `1`.
+Patch releases within the 0.4 plugin series and 0.5 VariaQ series are accepted.
+Other VariaQ series or future schema versions are reported as unsupported with a
+clear compatibility error.
 
 ## CUDA-Q and GPU behavior
 
@@ -167,9 +167,50 @@ One verified Pop!_OS development machine had CUDA-Q 0.16.0.post1, `qpp-cpu`,
 the NVIDIA target, and one compatible GPU. This is an example, not a portable
 requirement or assumption.
 
+## VariaQ problem families
+
+Starting with bb-plugin-variaq 0.4.0, the plugin exposes VariaQ 0.5's generic
+problem families:
+
+| Family           | Classical | Quantum |
+|------------------|-----------|---------|
+| MaxCut           | yes       | yes     |
+| Assignment       | yes       | yes     |
+| Subset Selection | yes       | yes     |
+| Graph Partition  | yes       | not advertised |
+
+This matrix comes from VariaQ `capabilities --json` and may evolve with future
+VariaQ releases. Check `variaq_status` for the live solver `supported_families`
+list rather than relying on this table.
+
+- **MaxCut** — partition graph nodes to maximize cut weight.
+- **Assignment** — assign generic tasks to resources with scores/costs, optional
+  prohibited pairs, capacities, and demands.
+- **Subset Selection** — choose candidates with values/costs, optional budget,
+  cardinality bounds, and pairwise interactions.
+- **Graph Partitioning** — partition a weighted graph with optional balance
+  constraints. Quantum support is not advertised in VariaQ 0.5.0.
+
+The plugin remains a thin adapter: it does not understand external project
+semantics. A downstream domain adapter translates project objects into these
+generic families and maps results back:
+
+```text
+domain project
+     ↓
+domain adapter
+     ↓
+VariaQ generic problem
+     ↑
+     │
+bb-plugin-variaq
+```
+
+Project-specific adapters live outside this plugin.
+
 ## Limitations
 
-- VariaQ 0.4.0 provides local execution only; there is no physical-QPU path.
+- VariaQ 0.5.0 provides local execution only; there is no physical-QPU path.
 - There is no IBM Runtime/provider integration and no credential handling.
 - Generic CI does not require CUDA-Q, an NVIDIA GPU, a physical QPU, or remote
   services.
@@ -177,6 +218,8 @@ requirement or assumption.
   integration.
 - Solver correctness belongs to VariaQ's own test suite; plugin tests cover the
   integration boundary.
+- A quantum run may return some infeasible samples; the plugin preserves
+  VariaQ's feasibility diagnostics and does not treat them as a plugin error.
 
 ## Deterministic smoke test
 
@@ -216,7 +259,7 @@ npm run test:integration
 ```
 
 The normal GitHub Actions plugin job uses the deterministic fake CLI. A
-separate Linux integration job checks out the immutable VariaQ `v0.4.0` tag,
+separate Linux integration job checks out the immutable VariaQ `v0.5.0` tag,
 installs `.[quantum]`, and exercises local classical/Qiskit workflows.
 CUDA-Q and GPU verification remain manual or suitable for a future self-hosted
 runner.
@@ -238,33 +281,3 @@ expects valid schema-v1 JSON on stdout; malformed output produces a clear
 integration error with bounded excerpts instead of heuristic recovery.
 
 Error responses do not include the subprocess environment.
-
-## VariaQ problem families
-
-Starting with bb-plugin-variaq 0.3.0, the plugin exposes VariaQ 0.4's generic
-problem families:
-
-- **MaxCut** — partition graph nodes to maximize cut weight.
-- **Assignment** — assign generic tasks to resources with scores/costs, optional
-  prohibited pairs, capacities, and demands.
-- **Subset Selection** — choose candidates with values/costs, optional budget,
-  cardinality bounds, and pairwise interactions.
-- **Graph Partitioning** — partition a weighted graph with optional balance
-  constraints.
-
-The plugin remains a thin adapter: it does not understand external project
-semantics. A downstream domain adapter translates project objects into these
-generic families and maps results back:
-
-```text
-domain project
-     ↓
-domain adapter
-     ↓
-VariaQ generic problem
-     ↑
-     │
-bb-plugin-variaq
-```
-
-Project-specific adapters live outside this plugin.

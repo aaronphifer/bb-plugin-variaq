@@ -5,7 +5,7 @@ import { join } from "node:path";
 import crypto from "node:crypto";
 import { problemFamilySchema, type ProblemFamily } from "./lib/schema.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { PluginError, checkVariaqVersion, generateProblemArgv, parseJsonOutput, parseKeyValue, parseSolvers, probeCapabilities, requireSuccess, resolveConfig, runVariaqJson, runVariaqStrict, solverSupportsFamily, statusFromCapabilities } from "./lib/runner.js";
+import { PluginError, checkVariaqVersion, generateProblemArgv, parseJsonOutput, parseKeyValue, parseSolvers, probeCapabilities, quantumSupportNote, requireSuccess, resolveConfig, runVariaqJson, runVariaqStrict, solverSupportsFamily, statusFromCapabilities } from "./lib/runner.js";
 import type { ResolvedConfig, VariaqSettings, CompareQuantumEnvelopeData, BenchmarkEnvelopeData, ReproduceEnvelopeData, ProblemGenerateData, SolveEnvelopeData, FamilyGenerateInput, VariaqSolver } from "./lib/runner.js";
 
 const SOLVERS = ["exact", "heuristic", "qaoa", "cudaq-cpu", "cudaq-gpu"] as const;
@@ -29,8 +29,10 @@ const USAGE = `bb variaq — Run VariaQ classical/quantum experiments from bb
 Problem families: maxcut, assignment, subset-selection, graph-partition.
 
 This plugin shells out to the standalone VariaQ CLI. Solver/quantum logic
-lives in VariaQ — never here. CUDA-Q solvers require VariaQ's 'cudaq' extra;
-GPU backends additionally need a working NVIDIA toolchain.`;
+lives in VariaQ — never here. Quantum solver availability and supported
+problem families are reported dynamically by VariaQ capabilities. CUDA-Q
+solvers require VariaQ's 'cudaq' extra; GPU backends additionally need a
+working NVIDIA toolchain.`;
 
 export default async function plugin(bb: BbPluginApi) {
   // All four path settings default to "" = auto-discover. Resolved per call and
@@ -279,11 +281,18 @@ export default async function plugin(bb: BbPluginApi) {
     );
     const quantumSolvers = ["qaoa", "cudaq-cpu", "cudaq-gpu"] as const;
     if (family !== null) {
-      const supported = quantumSolvers.filter((solver) => solverSupportsFamily(solver, family, solverSupportedFamilies));
-      if (supported.length === 0) {
+      const unsupported = quantumSolvers.filter((solver) => !solverSupportsFamily(solver, family, solverSupportedFamilies));
+      if (unsupported.length === quantumSolvers.length) {
         throw new PluginError(
           `compare quantum has no available quantum solvers for problem family '${family}'.`,
-          "Use a problem family supported by qaoa/cudaq-* (currently maxcut), or run individual solvers via variaq_solve.",
+          quantumSupportNote(family, solverSupportedFamilies),
+        );
+      }
+      if (unsupported.length > 0) {
+        throw new PluginError(
+          `compare quantum cannot include every selected solver for problem family '${family}'.`,
+          unsupported.map((s) => `'${s}' does not support '${family}'; supported families: ${(solverSupportedFamilies[s] ?? []).join(", ")}.`).join(" ") +
+          " Select only solvers whose supported_families include this problem family, or use variaq_solve for individual solvers.",
         );
       }
     }
@@ -392,7 +401,7 @@ export default async function plugin(bb: BbPluginApi) {
       },
       {
         name: "compare-quantum",
-        summary: "Run matched Qiskit/CUDA-Q QAOA comparison",
+        summary: "Run matched Qiskit/CUDA-Q QAOA comparison on a family supported by the selected quantum solvers",
         usage: "bb variaq compare-quantum <problem-id> [--p N] [--repeats N] [--json]",
       },
       { name: "runs", summary: "List recent experiment runs", usage: "bb variaq runs [--limit N] [--json]" },
@@ -683,7 +692,7 @@ export default async function plugin(bb: BbPluginApi) {
     description:
       "Run one VariaQ solver on a generic problem and persist the run. Returns the run id plus the full run record (objective, gap, solution, backend metrics).",
     instructions:
-      "Use variaq_solve for a single solver run on a VariaQ generic problem. Solvers: exact, heuristic (all families), qaoa (MaxCut only), cudaq-cpu, cudaq-gpu (MaxCut only, require cudaq extra). No physical QPU execution exists.",
+      "Use variaq_solve for a single solver run on a VariaQ generic problem. Solvers: exact, heuristic (all families), qaoa, cudaq-cpu, cudaq-gpu. Solver/family compatibility is determined by VariaQ capabilities — check variaq_status before running optional quantum solvers. No physical QPU execution exists.",
     parameters: z.object({
       problemId: z.string().min(1).describe("Problem id from variaq_problem_generate or the VariaQ CLI"),
       solver: solverEnum.describe("Solver name"),
@@ -736,9 +745,9 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "variaq_compare_quantum",
     description:
-      "Run VariaQ's matched Qiskit/CUDA-Q QAOA comparison on a MaxCut problem. Returns the per-solver run records and the matched comparison structure.",
+      "Run VariaQ's matched Qiskit/CUDA-Q QAOA comparison on a problem family supported by the selected quantum solvers. Returns the per-solver run records and the matched comparison structure.",
     instructions:
-      "Use variaq_compare_quantum to compare matched QAOA implementations on a problem supported by VariaQ's quantum solvers (currently MaxCut only in VariaQ 0.4.x). CUDA-Q solvers require VariaQ's 'cudaq' extra. The plugin consults VariaQ capabilities to decide eligibility.",
+      "Use variaq_compare_quantum to compare matched QAOA implementations on a problem supported by VariaQ's quantum solvers. Quantum solver availability and supported problem families are reported dynamically by VariaQ capabilities — check variaq_status before running. CUDA-Q solvers require VariaQ's 'cudaq' extra. The plugin consults VariaQ capabilities to decide eligibility.",
     parameters: z.object({
       problemId: z.string().min(1).describe("Problem id"),
       p: z.number().int().min(1).max(4).optional().describe("QAOA depth p (default 1)"),
@@ -981,9 +990,26 @@ function formatCliOutput(value: unknown, json: boolean): string {
     const family = run?.problem_type ?? run?.family ?? "unknown";
     const solver = run?.solver ?? "unknown";
     const backend = run?.backend ?? "unknown";
+    const status = run?.status ?? "unknown";
     const objective = run?.objective ?? "?";
+    const expectation = run?.expectation ?? null;
     const feasible = run?.feasible ?? "?";
-    return `Run ${String(record.runId)}\n  family: ${String(family)}\n  solver: ${String(solver)}\n  backend: ${String(backend)}\n  objective: ${String(objective)}\n  feasible: ${String(feasible)}\n${JSON.stringify(record, null, 2)}`;
+    const feasibleCount = run?.feasible_sample_count ?? null;
+    const infeasibleCount = run?.infeasible_sample_count ?? null;
+    const totalSamples = feasibleCount !== null && infeasibleCount !== null ? Number(feasibleCount) + Number(infeasibleCount) : null;
+    const lines = [
+      `Run ${String(record.runId)}`,
+      `  family: ${String(family)}`,
+      `  solver: ${String(solver)}`,
+      `  backend: ${String(backend)}`,
+      `  status: ${String(status)}`,
+      `  objective: ${String(objective)}`,
+      ...(expectation !== null ? [`  expectation: ${String(expectation)}`] : []),
+      `  feasible: ${String(feasible)}${totalSamples !== null ? ` (${feasibleCount}/${totalSamples} samples)` : ""}`,
+    ];
+    lines.push("");
+    lines.push(JSON.stringify(record, null, 2));
+    return lines.join("\n");
   }
 
   if ("runIds" in record) {
@@ -999,7 +1025,21 @@ function formatCliOutput(value: unknown, json: boolean): string {
         `  successful: ${String(comparison.successful_count ?? "?")}, failed: ${String(comparison.failed_count ?? "?")}, unavailable: ${String(comparison.unavailable_count ?? "?")}`,
       ];
       for (const run of runs ?? []) {
-        lines.push(`  ${String(run.solver)}: status=${String(run.status)}, objective=${String(run.objective ?? "?")}, gap=${String(run.optimality_gap_percent ?? "?")}, time=${String(run.wall_time_seconds ?? "?")}s`);
+        const r = run as Record<string, unknown>;
+        const expectation = r.expectation ?? null;
+        const feasible = r.feasible ?? "?";
+        const feasibleCount = r.feasible_sample_count ?? null;
+        const infeasibleCount = r.infeasible_sample_count ?? null;
+        const totalSamples = feasibleCount !== null && infeasibleCount !== null ? Number(feasibleCount) + Number(infeasibleCount) : null;
+        const feasibleText = totalSamples !== null ? ` (${feasibleCount}/${totalSamples} samples)` : "";
+        const parts = [
+          `  ${String(r.solver)}: status=${String(r.status)}, objective=${String(r.objective ?? "?")}`,
+          ...(expectation !== null ? [`expectation=${String(expectation)}`] : []),
+          `gap=${String(r.optimality_gap_percent ?? "?")}`,
+          `feasible=${String(feasible)}${feasibleText}`,
+          `time=${String(r.wall_time_seconds ?? "?")}s`,
+        ];
+        lines.push(parts.join(", "));
       }
       lines.push("");
       lines.push(JSON.stringify(record, null, 2));
