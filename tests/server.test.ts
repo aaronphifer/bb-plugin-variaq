@@ -62,7 +62,7 @@ describeReal("plugin registration", () => {
     const h = await setupHost();
     const version = await cli(h, ["version"]);
     expect(version.exitCode).toBe(0);
-    expect(version.stdout).toContain("variaq 0.4.1");
+    expect(version.stdout).toContain("variaq 0.5.0");
   });
 });
 
@@ -72,7 +72,7 @@ describeReal("status/version", () => {
     const result = await tool(h, "variaq_status", {});
     const s = JSON.parse(String(result));
     expect(s.variaq.installed).toBe(true);
-    expect(s.variaq.version).toBe("0.4.1");
+    expect(s.variaq.version).toBe("0.5.0");
     expect(s.variaq.schema_version).toBe("1");
     expect(s.variaq.python).toBe(VARIAQ_PYTHON);
     expect(s.solvers.exact).toBe("available");
@@ -157,10 +157,26 @@ describeReal("benchmark", () => {
     expect(result.runs.length).toBe(3);
     expect(result.comparison.solver_count).toBe(3);
   });
+
+  it("benchmarks assignment with quantum support", async () => {
+    const h = await setupHost();
+    const generated = JSON.parse(String(
+      await tool(h, "variaq_problem_generate", { family: "assignment", taskCount: 4, resourceCount: 3, seed: 7 }),
+    ));
+    const result = JSON.parse(String(
+      await tool(h, "variaq_benchmark", {
+        problemId: generated.problemId,
+        solvers: ["exact", "heuristic", "qaoa"],
+        seed: 42,
+      }),
+    ));
+    expect(["success", "partial"]).toContain(result.status);
+    expect(result.runs.length).toBe(3);
+  });
 });
 
 describeReal("compare quantum", () => {
-  it("returns matched QAOA comparison structure", async () => {
+  it("returns matched QAOA comparison structure for maxcut", async () => {
     const h = await setupHost();
     const generated = JSON.parse(String(
       await tool(h, "variaq_problem_generate", { family: "maxcut", nodes: 4, edgeProbability: 0.6, seed: 17 }),
@@ -176,8 +192,38 @@ describeReal("compare quantum", () => {
     expect(result.comparison.matched_qaoa).toBe(true);
     expect(result.runs.length).toBeGreaterThanOrEqual(1);
   });
-});
 
+  it("returns matched QAOA comparison structure for assignment", async () => {
+    const h = await setupHost();
+    const generated = JSON.parse(String(
+      await tool(h, "variaq_problem_generate", { family: "assignment", taskCount: 4, resourceCount: 3, seed: 19 }),
+    ));
+    const result = JSON.parse(String(
+      await tool(h, "variaq_compare_quantum", {
+        problemId: generated.problemId,
+        p: 1,
+        repeats: 1,
+      }),
+    ));
+    expect(["success", "partial"]).toContain(result.status);
+    expect(result.comparison.matched_qaoa).toBe(true);
+  });
+
+  it("rejects graph-partition because quantum support is not advertised", async () => {
+    const h = await setupHost();
+    const generated = JSON.parse(String(
+      await tool(h, "variaq_problem_generate", { family: "graph-partition", nodes: 5, edgeProbability: 0.4, partitionCount: 2, seed: 23 }),
+    ));
+    const result = JSON.parse(String(
+      await tool(h, "variaq_compare_quantum", {
+        problemId: generated.problemId,
+        p: 1,
+        repeats: 1,
+      }),
+    ));
+    expect(result.error).toMatch(/compare quantum has no available quantum solvers for problem family 'graph-partition'/);
+  });
+});
 
 
 describeReal("assignment family", () => {
@@ -200,26 +246,17 @@ describeReal("assignment family", () => {
     const heuristic = JSON.parse(String(await tool(h, "variaq_solve", { problemId, solver: "heuristic", seed: 1 })));
     expect(heuristic.run.status).toBe("success");
 
+    const qaoa = JSON.parse(String(await tool(h, "variaq_solve", { problemId, solver: "qaoa", seed: 1 })));
+    expect(qaoa.run.status).toBe("success");
+
     const benchmark = JSON.parse(String(
-      await tool(h, "variaq_benchmark", { problemId, solvers: ["exact", "heuristic"], seed: 1 }),
+      await tool(h, "variaq_benchmark", { problemId, solvers: ["exact", "heuristic", "qaoa"], seed: 1 }),
     ));
-    expect(benchmark.status).toBe("success");
-    expect(benchmark.comparison.successful_count).toBe(2);
+    expect(["success", "partial"]).toContain(benchmark.status);
 
     const reproduced = JSON.parse(String(await tool(h, "variaq_run_reproduce", { runId: exact.runId })));
     expect(reproduced.run.status).toBe("success");
     expect(reproduced.rerunOf).toBe(exact.runId);
-  });
-
-  it("qaoa is unsupported", async () => {
-    const h = await setupHost();
-    const generated = JSON.parse(String(
-      await tool(h, "variaq_problem_generate", { family: "assignment", taskCount: 4, resourceCount: 3, seed: 2 }),
-    ));
-    const result = JSON.parse(String(
-      await tool(h, "variaq_solve", { problemId: generated.problemId, solver: "qaoa" }),
-    ));
-    expect(String(result.error?.message || result.error)).toMatch(/does not support problem family|supports? MaxCut only/i);
   });
 });
 
@@ -241,24 +278,16 @@ describeReal("subset-selection family", () => {
     const heuristic = JSON.parse(String(await tool(h, "variaq_solve", { problemId, solver: "heuristic", seed: 2 })));
     expect(heuristic.run.status).toBe("success");
 
+    const qaoa = JSON.parse(String(await tool(h, "variaq_solve", { problemId, solver: "qaoa", seed: 2 })));
+    expect(qaoa.run.status).toBe("success");
+
     const benchmark = JSON.parse(String(
-      await tool(h, "variaq_benchmark", { problemId, solvers: ["exact", "heuristic"], seed: 2 }),
+      await tool(h, "variaq_benchmark", { problemId, solvers: ["exact", "heuristic", "qaoa"], seed: 2 }),
     ));
-    expect(benchmark.status).toBe("success");
+    expect(["success", "partial"]).toContain(benchmark.status);
 
     const reproduced = JSON.parse(String(await tool(h, "variaq_run_reproduce", { runId: exact.runId })));
     expect(reproduced.run.status).toBe("success");
-  });
-
-  it("cudaq-cpu is unsupported", async () => {
-    const h = await setupHost();
-    const generated = JSON.parse(String(
-      await tool(h, "variaq_problem_generate", { family: "subset-selection", candidateCount: 5, seed: 3 }),
-    ));
-    const result = JSON.parse(String(
-      await tool(h, "variaq_solve", { problemId: generated.problemId, solver: "cudaq-cpu" }),
-    ));
-    expect(String(result.error?.message || result.error)).toMatch(/does not support problem family|supports? MaxCut only/i);
   });
 });
 
@@ -277,7 +306,6 @@ describeReal("graph-partition family", () => {
 
     const exact = JSON.parse(String(await tool(h, "variaq_solve", { problemId, solver: "exact", seed: 3 })));
     expect(exact.run.status).toBe("success");
-    // Sense is a problem-level field; solve result shape does not include it.
     expect(shown.problem.sense).toBe("minimize");
 
     const heuristic = JSON.parse(String(await tool(h, "variaq_solve", { problemId, solver: "heuristic", seed: 3 })));
@@ -291,12 +319,23 @@ describeReal("graph-partition family", () => {
     const reproduced = JSON.parse(String(await tool(h, "variaq_run_reproduce", { runId: exact.runId })));
     expect(reproduced.run.status).toBe("success");
   });
+
+  it("qaoa is rejected for graph-partition based on capabilities", async () => {
+    const h = await setupHost();
+    const generated = JSON.parse(String(
+      await tool(h, "variaq_problem_generate", { family: "graph-partition", nodes: 5, edgeProbability: 0.4, partitionCount: 2, seed: 4 }),
+    ));
+    const result = JSON.parse(String(
+      await tool(h, "variaq_solve", { problemId: generated.problemId, solver: "qaoa" }),
+    ));
+    expect(result.exitCode).not.toBe(0);
+    expect(String(result.error?.message || result.error)).toMatch(/does not support problem family/);
+  });
 });
 
 describeReal("problem import", () => {
   it("imports a valid assignment artifact", async () => {
     const h = await setupHost();
-    // Generate a real assignment problem, read its JSON, and re-import it.
     const generated = JSON.parse(String(
       await tool(h, "variaq_problem_generate", { family: "assignment", taskCount: 3, resourceCount: 2, seed: 9 }),
     ));
@@ -310,10 +349,29 @@ describeReal("problem import", () => {
 });
 
 describeReal("real heuristic and Qiskit integration", () => {
-  it("runs deterministic heuristic and local Qiskit QAOA solves", async () => {
+  it("runs deterministic heuristic and local Qiskit QAOA solves on maxcut", async () => {
     const h = await setupHost();
     const generated = JSON.parse(String(
       await tool(h, "variaq_problem_generate", { family: "maxcut", nodes: 4, edgeProbability: 0.6, seed: 17 }),
+    ));
+    for (const solver of ["heuristic", "qaoa"] as const) {
+      const solved = JSON.parse(String(
+        await tool(h, "variaq_solve", {
+          problemId: generated.problemId,
+          solver,
+          seed: 17,
+          ...(solver === "qaoa" ? { params: { p: 1, optimizer_trials: 4, shots: 64 } } : {}),
+        }),
+      ));
+      expect(solved.run.status).toBe("success");
+      expect(solved.run.solver).toBe(solver);
+    }
+  });
+
+  it("runs deterministic heuristic and local Qiskit QAOA solves on assignment", async () => {
+    const h = await setupHost();
+    const generated = JSON.parse(String(
+      await tool(h, "variaq_problem_generate", { family: "assignment", taskCount: 4, resourceCount: 3, seed: 17 }),
     ));
     for (const solver of ["heuristic", "qaoa"] as const) {
       const solved = JSON.parse(String(

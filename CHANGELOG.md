@@ -1,12 +1,59 @@
-## 0.3.0 (unreleased)
+## 0.4.0 (unreleased)
 
-- VariaQ 0.4.1 compatibility; `schema_version` `1` validation remains mandatory.
+- VariaQ 0.5.0 compatibility; `schema_version` `1` validation remains mandatory.
+- Assignment quantum support via QAOA and CUDA-Q (when VariaQ's `cudaq` extra is installed).
+- Subset Selection quantum support via QAOA and CUDA-Q.
+- Capability-driven quantum family discovery: solver `supported_families` are
+  consumed directly from `variaq capabilities --json`; no plugin-side hardcoded
+  solver/family matrix.
+- Generalized `variaq_compare_quantum`: works on any problem family supported by
+  the selected quantum solvers as reported by VariaQ capabilities.
+- Preserve VariaQ 0.5 BQM metadata, feasibility diagnostics (`feasible_sample_count`,
+  `infeasible_sample_count`), penalty metadata, expectation, lowered energy, and
+  timing fields without recalculation or flattening.
+- Graph Partition quantum attempts are rejected based on live VariaQ capabilities
+  (quantum support is not advertised in VariaQ 0.5.0).
+- Updated human-readable CLI formatting for solve/benchmark to show family, backend,
+  status, objective, expectation, and feasible/total samples where present.
+- Hosted CI updated to VariaQ `v0.5.0`; generic-family and Assignment/Subset quantum
+  coverage added. CUDA-Q remains optional in hosted CI.
+- No external domain semantics, adapter execution, Ollama Fleet, Triagewall,
+  physical QPU, UI, or web API added.
+
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [0.4.0] - Unreleased
+
+- Target VariaQ 0.5.x and its stable machine-readable CLI contract.
+- Recognize all four generic problem families: `maxcut`, `assignment`,
+  `subset-selection`, `graph-partition`.
+- Consume solver `supported_families` from `variaq capabilities --json`; let
+  VariaQ advertise which families each quantum solver supports.
+- Add quantum support for `assignment` and `subset-selection` through VariaQ 0.5.
+- Generalize `compare quantum` so it works for any family supported by the selected
+  quantum solvers, not only MaxCut.
+- Preserve VariaQ 0.5 BQM/feasibility/expectation metadata in solve, benchmark,
+  compare-quantum, and run records.
+- Reject Graph Partition quantum runs from VariaQ capabilities rather than a
+  hardcoded family list.
+- Update human-readable CLI formatting for multi-family results.
+- Update CI to verify against VariaQ `v0.5.0` and exercise quantum workflows for
+  Assignment and Subset Selection.
+
+Physical-QPU execution, external domain adapter execution, and downstream
+project integrations are not part of this release.
+
+## [0.3.0] - Unreleased
+
+- VariaQ 0.4.x compatibility; `schema_version` `1` validation remains mandatory.
 - Family-aware problem generation for all VariaQ 0.4 generic families:
   `maxcut`, `assignment`, `subset-selection`, `graph-partition`.
 - Capability model consumes VariaQ's per-solver `supported_families` from
   `variaq capabilities --json`; no plugin-side hardcoded solver/family matrix.
-- Compare-quantum eligibility is now derived from VariaQ capabilities rather
-  than a plugin-level `maxcut`-only check.
+- Compare-quantum eligibility derived from VariaQ capabilities rather than a
+  plugin-level family check.
 - `variaq_problem_import` agent tool and `bb variaq problem-import` CLI command
   for importing structured problem artifacts, with safe temporary-file staging
   and no arbitrary filesystem traversal.
@@ -16,38 +63,12 @@
 - Objective sense (`maximize` / `minimize`) and opaque problem/run IDs are
   preserved across all families.
 - `runs list`, `run show`, and `run reproduce` are family-neutral.
-- Added `bb variaq status` human formatting for VariaQ 0.4 capabilities.
+- Added `bb variaq status` human formatting for VariaQ capabilities.
 - Smoke script now exercises an `assignment` workflow in addition to MaxCut.
-- Updated hosted CI to VariaQ `v0.4.0` and added generic-family unit and
+- Updated hosted CI to VariaQ `v0.4.x` and added generic-family unit and
   integration coverage.
 - No external domain semantics, adapter execution, Ollama Fleet, Triagewall,
   physical QPU, UI, or web API added.
-
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-## [0.3.0] - Unreleased
-
-- Target VariaQ 0.4.x and its stable machine-readable CLI contract.
-- Recognize all four generic problem families: `maxcut`, `assignment`,
-  `subset-selection`, `graph-partition`.
-- Consume solver `supported_families` from `variaq capabilities --json`; report
-  quantum solvers as MaxCut-only.
-- Add `variaq_problem_import` tool and `bb variaq problem-import` command with
-  a safe content-only boundary (no arbitrary filesystem reads).
-- Update `variaq_problem_generate` to a discriminated family schema; support
-  family-specific generator fields.
-- Preserve objective sense (`maximize` / `minimize`) and opaque IDs in problem
-  show, solve, benchmark, and run records.
-- Make solve/benchmark/compare-quantum family-aware; unsupported solver/family
-  combinations produce structured failures.
-- Keep `compare quantum` MaxCut-only.
-- Update human-readable CLI formatting for multi-family results.
-- Update CI to verify against VariaQ `v0.4.0` and exercise all four families.
-
-Physical-QPU execution, external domain adapter execution, and downstream
-project integrations are not part of this release.
 
 ## [0.2.0] - Unreleased
 

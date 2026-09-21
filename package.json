@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-variaq",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Thin bb adapter for the standalone VariaQ hybrid-compute research platform.",
   "license": "Apache-2.0",

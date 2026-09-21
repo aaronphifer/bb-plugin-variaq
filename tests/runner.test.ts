@@ -12,6 +12,7 @@ import {
   parseJsonOutput,
   parseKeyValue,
   parseSolvers,
+  quantumSupportNote,
   requireSuccess,
   resolveConfig,
   runVariaq,
@@ -133,7 +134,7 @@ describe("runVariaq argv construction", () => {
       dbPath: "/data/variaq.sqlite3",
       problemsDir: "/data/problems",
     });
-    vi.mocked(spawn).mockReturnValueOnce(fakeProc(0, "variaq 0.3.0\n", "") as never);
+    vi.mocked(spawn).mockReturnValueOnce(fakeProc(0, "variaq 0.5.0\n", "") as never);
     await runVariaq(c, ["--version"]);
     const [cmd, argv, opts] = vi.mocked(spawn).mock.calls[0]!;
     expect(cmd).toBe(join(project, ".venv", "bin", "python"));
@@ -241,6 +242,12 @@ describe("input validators", () => {
     expect(e.hint).toBe("do this");
     expect(new PluginError("boom2").hint).toBeUndefined();
   });
+
+  it("quantumSupportNote is derived from capabilities, not hardcoded", () => {
+    const cap = { qaoa: ["maxcut", "assignment"], "cudaq-cpu": ["maxcut"] };
+    expect(quantumSupportNote("assignment", cap)).toContain("qaoa");
+    expect(quantumSupportNote("graph-partition", cap)).toMatch(/not advertised/);
+  });
 });
 
 const validEnv = JSON.stringify({
@@ -327,10 +334,16 @@ describe("runVariaqJson", () => {
 });
 
 describe("VariaQ output contracts", () => {
-  it("accepts patch releases in the verified 0.4 series", () => {
-    expect(checkVariaqVersion("variaq 0.4.0").supported).toBe(true);
-    expect(checkVariaqVersion("0.4.7").supported).toBe(true);
-    expect(checkVariaqVersion("0.4.0", "1").schemaVersionSupported).toBe(true);
+  it("accepts patch releases in the verified 0.5 series", () => {
+    expect(checkVariaqVersion("variaq 0.5.0").supported).toBe(true);
+    expect(checkVariaqVersion("0.5.7").supported).toBe(true);
+    expect(checkVariaqVersion("0.5.0", "1").schemaVersionSupported).toBe(true);
+  });
+
+  it("rejects the 0.4 series as unsupported", () => {
+    const result = checkVariaqVersion("variaq 0.4.1", "1");
+    expect(result.supported).toBe(false);
+    expect(result.warning).toMatch(/Unsupported VariaQ version 0\.4\.1/);
   });
 
   it("warns without hard-failing for unsupported versions", () => {
@@ -340,7 +353,7 @@ describe("VariaQ output contracts", () => {
   });
 
   it("rejects unsupported schema versions", () => {
-    const result = checkVariaqVersion("variaq 0.3.0", "2");
+    const result = checkVariaqVersion("variaq 0.5.0", "2");
     expect(result.schemaVersionSupported).toBe(false);
     expect(result.warning).toMatch(/schema_version 2/);
   });

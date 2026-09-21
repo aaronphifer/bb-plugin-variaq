@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import {
+  BB_PLUGIN_VARIAQ_VERSION,
   type EnvelopeStatus,
   type ParsedEnvelope,
   type ProblemFamily,
@@ -535,8 +536,10 @@ export async function runPython(
 }
 
 /**
- * VariaQ 0.4.0 capabilities --json data shape. We only model the pieces the
- * plugin reads; everything else is forwarded as unknown.
+ * VariaQ 0.5.x capabilities --json data shape. We only model the pieces the
+ * plugin reads; everything else is forwarded as unknown. Quantum solver
+ * supported families are reported dynamically by VariaQ and must not be
+ * hardcoded in the plugin.
  */
 export interface CapabilitiesData {
   variaq: {
@@ -609,20 +612,20 @@ export interface VariaqVersionCompatibility {
 }
 
 /**
- * bb-plugin-variaq 0.3.0 is verified against VariaQ 0.4.0 / schema_version 1.
- * Patch releases in the 0.4 series are accepted. Other series are reported as
+ * bb-plugin-variaq 0.4.0 is verified against VariaQ 0.5.0 / schema_version 1.
+ * Patch releases in the 0.5 series are accepted. Other series are reported as
  * unsupported so users can still inspect a mismatched environment.
  */
 export function checkVariaqVersion(raw: string | null, schemaVersion?: string): VariaqVersionCompatibility {
   const match = raw?.match(/(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\b|$)/);
   const version = match ? `${match[1]}.${match[2]}.${match[3]}` : null;
-  const supported = match?.[1] === "0" && match?.[2] === "4";
+  const supported = match?.[1] === "0" && match?.[2] === "5";
   const schemaVersionSupported = schemaVersion === undefined || schemaVersion === SUPPORTED_SCHEMA_VERSION;
 
   const parts: string[] = [];
   if (!supported) {
     parts.push(
-      `Unsupported VariaQ version ${version ?? "unknown"}; bb-plugin-variaq 0.3.0 is verified with VariaQ ${VERIFIED_VARIAQ_VERSION} and supports ${SUPPORTED_VARIAQ_SERIES}.`,
+      `Unsupported VariaQ version ${version ?? "unknown"}; bb-plugin-variaq ${BB_PLUGIN_VARIAQ_VERSION} is verified with VariaQ ${VERIFIED_VARIAQ_VERSION} and supports ${SUPPORTED_VARIAQ_SERIES}.`,
     );
   }
   if (!schemaVersionSupported) {
@@ -728,6 +731,23 @@ export async function statusFromCapabilities(
 }
 
 /**
+ * Build a human-readable note about quantum support for a problem family from
+ * the live capabilities. Used by compare-quantum and CLI formatting; it never
+ * hardcodes family names.
+ */
+export function quantumSupportNote(
+  family: ProblemFamily,
+  solverSupportedFamilies: Record<string, string[]>,
+): string {
+  const quantumSolvers = ["qaoa", "cudaq-cpu", "cudaq-gpu"] as const;
+  const supported = quantumSolvers.filter((s) => solverSupportsFamily(s, family, solverSupportedFamilies));
+  if (supported.length === 0) {
+    return `Quantum solver support for '${family}' is not advertised by this VariaQ release.`;
+  }
+  return `Quantum solvers available for '${family}': ${supported.join(", ")}.`;
+}
+
+/**
  * Extract data from a schema-v1 envelope, preserving status, warnings and error.
  * On a non-success status the result still includes `data` and `error` so callers
  * can choose whether to surface VariaQ's structured failure as an error.
@@ -767,6 +787,8 @@ export interface SolveEnvelopeData {
   optimality_gap_percent: number | null;
   approximation_ratio: number | null;
   feasible: boolean | null;
+  feasible_sample_count: number | null;
+  infeasible_sample_count: number | null;
   constraint_violations: unknown[];
   wall_time_seconds: number | null;
   solver_time_seconds: number | null;
@@ -779,13 +801,32 @@ export interface SolveEnvelopeData {
   selected_parameter_index: number | null;
   selected_parameters: unknown;
   expectation: number | null;
+  lowered_energy: number | null;
   qubit_count: number | null;
+  binary_variable_count: number | null;
+  logical_variable_count: number | null;
+  auxiliary_variable_count: number | null;
   circuit_depth: number | null;
   gate_count: number | null;
   logical_gate_count: number | null;
   backend_metadata: Record<string, unknown>;
   environment: Record<string, unknown>;
   created_at: string;
+  // Optional BQM / penalty metadata; preserve when present.
+  bqm?: {
+    digest?: string;
+    variable_count?: number;
+    linear_term_count?: number;
+    quadratic_term_count?: number;
+  };
+  penalties?: Array<{
+    name?: string;
+    weight?: number;
+    violated?: boolean;
+    contribution?: number;
+  }>;
+  precision?: string;
+  timing?: Record<string, number | null>;
 }
 
 export interface BenchmarkEnvelopeData {

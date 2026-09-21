@@ -67,7 +67,7 @@ export type ProblemFamily = (typeof PROBLEM_FAMILIES)[number];
 
 export const problemFamilySchema = z.enum(PROBLEM_FAMILIES);
 
-/** Validate a problem family name against VariaQ 0.4 generic families. */
+/** Validate a problem family name against VariaQ 0.5 generic families. */
 export function isProblemFamily(value: string): value is ProblemFamily {
   return PROBLEM_FAMILIES.includes(value as ProblemFamily);
 }
@@ -85,9 +85,9 @@ export interface ParsedEnvelope {
 export const SUPPORTED_SCHEMA_VERSION = "1";
 
 /** Compatibility metadata, mirrored here for the schema module. */
-export const BB_PLUGIN_VARIAQ_VERSION = "0.3.0";
-export const VERIFIED_VARIAQ_VERSION = "0.4.1";
-export const SUPPORTED_VARIAQ_SERIES = "0.4.x";
+export const BB_PLUGIN_VARIAQ_VERSION = "0.4.0";
+export const VERIFIED_VARIAQ_VERSION = "0.5.0";
+export const SUPPORTED_VARIAQ_SERIES = "0.5.x";
 
 /**
  * Validate a VariaQ JSON envelope.
