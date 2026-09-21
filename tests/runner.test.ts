@@ -29,6 +29,7 @@ const base: VariaqSettings = {
   projectDir: "",
   dbPath: "",
   problemsDir: "",
+  reportOutputDir: "",
   timeoutMs: 1000,
 };
 
@@ -334,16 +335,16 @@ describe("runVariaqJson", () => {
 });
 
 describe("VariaQ output contracts", () => {
-  it("accepts patch releases in the verified 0.5 series", () => {
-    expect(checkVariaqVersion("variaq 0.5.0").supported).toBe(true);
-    expect(checkVariaqVersion("0.5.7").supported).toBe(true);
-    expect(checkVariaqVersion("0.5.0", "1").schemaVersionSupported).toBe(true);
+  it("accepts patch releases in the verified 0.6 series", () => {
+    expect(checkVariaqVersion("variaq 0.6.0").supported).toBe(true);
+    expect(checkVariaqVersion("0.6.7").supported).toBe(true);
+    expect(checkVariaqVersion("0.6.0", "1").schemaVersionSupported).toBe(true);
   });
 
-  it("rejects the 0.4 series as unsupported", () => {
-    const result = checkVariaqVersion("variaq 0.4.1", "1");
+  it("rejects the 0.5 series as unsupported", () => {
+    const result = checkVariaqVersion("variaq 0.5.1", "1");
     expect(result.supported).toBe(false);
-    expect(result.warning).toMatch(/Unsupported VariaQ version 0\.4\.1/);
+    expect(result.warning).toMatch(/Unsupported VariaQ version 0\.5\.1/);
   });
 
   it("warns without hard-failing for unsupported versions", () => {

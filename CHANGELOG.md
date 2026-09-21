@@ -1,22 +1,19 @@
-## 0.4.0 (unreleased)
+## 0.5.0 (unreleased)
 
-- VariaQ 0.5.0 compatibility; `schema_version` `1` validation remains mandatory.
-- Assignment quantum support via QAOA and CUDA-Q (when VariaQ's `cudaq` extra is installed).
-- Subset Selection quantum support via QAOA and CUDA-Q.
-- Capability-driven quantum family discovery: solver `supported_families` are
-  consumed directly from `variaq capabilities --json`; no plugin-side hardcoded
-  solver/family matrix.
-- Generalized `variaq_compare_quantum`: works on any problem family supported by
-  the selected quantum solvers as reported by VariaQ capabilities.
-- Preserve VariaQ 0.5 BQM metadata, feasibility diagnostics (`feasible_sample_count`,
-  `infeasible_sample_count`), penalty metadata, expectation, lowered energy, and
-  timing fields without recalculation or flattening.
-- Graph Partition quantum attempts are rejected based on live VariaQ capabilities
-  (quantum support is not advertised in VariaQ 0.5.0).
-- Updated human-readable CLI formatting for solve/benchmark to show family, backend,
-  status, objective, expectation, and feasible/total samples where present.
-- Hosted CI updated to VariaQ `v0.5.0`; generic-family and Assignment/Subset quantum
-  coverage added. CUDA-Q remains optional in hosted CI.
+- VariaQ 0.6.0 compatibility; `schema_version` `1` validation remains mandatory.
+- Campaign planning (`variaq_campaign_plan`) and execution (`variaq_campaign_run`)
+  with VariaQ's max-run guard preserved.
+- Campaign list/show (`variaq_campaign_list`, `variaq_campaign_show`).
+- Analysis tools (`variaq_analyze_runs`, `variaq_analyze_campaign`) that return
+  VariaQ-derived groups, quality/feasibility/timing/resource summaries, and scaling
+  points without recalculating statistics in the plugin.
+- Report generation (`variaq_report_campaign`) for JSON/CSV/Markdown (and optional
+  plots when matplotlib is installed), with safe output path containment under the
+  configured report output directory.
+- Preserved source_run_ids, report IDs, null metrics, and mixed campaign status
+  summaries (success/failed/skipped/unavailable).
+- Hosted CI updated to VariaQ `v0.6.0` with bounded campaign plan/run,
+  analyze-campaign, and report-generation smoke coverage.
 - No external domain semantics, adapter execution, Ollama Fleet, Triagewall,
   physical QPU, UI, or web API added.
 
@@ -24,31 +21,31 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.4.0] - Unreleased
+## 0.5.0 - Unreleased
 
-- Target VariaQ 0.5.x and its stable machine-readable CLI contract.
-- Recognize all four generic problem families: `maxcut`, `assignment`,
-  `subset-selection`, `graph-partition`.
-- Consume solver `supported_families` from `variaq capabilities --json`; let
-  VariaQ advertise which families each quantum solver supports.
-- Add quantum support for `assignment` and `subset-selection` through VariaQ 0.5.
-- Generalize `compare quantum` so it works for any family supported by the selected
-  quantum solvers, not only MaxCut.
-- Preserve VariaQ 0.5 BQM/feasibility/expectation metadata in solve, benchmark,
-  compare-quantum, and run records.
-- Reject Graph Partition quantum runs from VariaQ capabilities rather than a
-  hardcoded family list.
-- Update human-readable CLI formatting for multi-family results.
-- Update CI to verify against VariaQ `v0.5.0` and exercise quantum workflows for
-  Assignment and Subset Selection.
+- Target VariaQ 0.6.x and its stable machine-readable CLI contract.
+- Add campaign planning/execution/list/show tools and matching `bb variaq`
+  subcommands. Campaign execution preserves VariaQ's default max-run guard.
+- Add read-only analysis tools (`variaq_analyze_runs`, `variaq_analyze_campaign`)
+  that forward VariaQ-derived group summaries, quality, feasibility, timing,
+  resource, and scaling metrics without plugin-side recalculation.
+- Add `variaq_report_campaign` with JSON/CSV/Markdown output and optional plots.
+  Reports are written beneath a configured/safe report output directory with
+  path-traversal prevention.
+- Preserve provenance: `source_run_ids`, `report_id`, `campaign_id`,
+  `report_format_version`, `generated_at`, `variaq_version`.
+- Preserve mixed campaign status summaries and null/missing metrics.
+- Reject VariaQ 0.5.x and other non-0.6 series with a clear compatibility warning.
+- Update CI to verify against VariaQ `v0.6.0` and exercise bounded campaign
+  plan/run, analysis, and report generation.
 
 Physical-QPU execution, external domain adapter execution, and downstream
 project integrations are not part of this release.
 
-## [0.3.0] - Unreleased
+## 0.4.0 - Unreleased
 
-- VariaQ 0.4.x compatibility; `schema_version` `1` validation remains mandatory.
-- Family-aware problem generation for all VariaQ 0.4 generic families:
+- VariaQ 0.5.x compatibility; `schema_version` `1` validation remains mandatory.
+- Family-aware problem generation for all VariaQ 0.5 generic families:
   `maxcut`, `assignment`, `subset-selection`, `graph-partition`.
 - Capability model consumes VariaQ's per-solver `supported_families` from
   `variaq capabilities --json`; no plugin-side hardcoded solver/family matrix.
@@ -65,12 +62,12 @@ project integrations are not part of this release.
 - `runs list`, `run show`, and `run reproduce` are family-neutral.
 - Added `bb variaq status` human formatting for VariaQ capabilities.
 - Smoke script now exercises an `assignment` workflow in addition to MaxCut.
-- Updated hosted CI to VariaQ `v0.4.x` and added generic-family unit and
+- Updated hosted CI to VariaQ `v0.5.0` and added generic-family unit and
   integration coverage.
 - No external domain semantics, adapter execution, Ollama Fleet, Triagewall,
   physical QPU, UI, or web API added.
 
-## [0.2.0] - Unreleased
+## 0.2.0 - Unreleased
 
 - Target VariaQ 0.3.x and its stable machine-readable CLI contract.
 - Validate VariaQ `schema_version = "1"` envelopes; reject unknown future
@@ -92,7 +89,7 @@ project integrations are not part of this release.
 Physical-QPU execution and remote quantum-provider integration are not part
 of this release.
 
-## [0.1.0] - Unreleased
+## 0.1.0 - Unreleased
 
 - Initial thin integration with the standalone VariaQ CLI.
 - Eight experiment and persisted-run tools, plus status and version tools (ten

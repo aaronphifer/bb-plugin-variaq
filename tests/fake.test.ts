@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +25,7 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-async function setup(tools: { timeoutMs?: number } = {}) {
+async function setup(options: { timeoutMs?: number; reportOutputDir?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "variaq-fake-"));
   temps.push(dir);
   const fakePython = join(dir, "python");
@@ -34,12 +34,15 @@ async function setup(tools: { timeoutMs?: number } = {}) {
   const h = createFakePluginHost({ pluginId: "variaq" });
   hosts.push(h);
   await plugin(h.bb);
+  const campaignState = join(dir, "campaigns.json");
+  vi.stubEnv("FAKE_CAMPAIGN_STATE", campaignState);
   await h.harness.behavior.setSettings({
     pythonPath: fakePython,
     projectDir: dir,
     dbPath: null,
     problemsDir: null,
-    timeoutMs: tools.timeoutMs ?? 120_000,
+    reportOutputDir: options.reportOutputDir ?? join(dir, "reports"),
+    timeoutMs: options.timeoutMs ?? 120_000,
   });
   return h;
 }
@@ -71,20 +74,20 @@ describe("status via fake CLI", () => {
     expect(status.solvers["cudaq-cpu"]).toBe("unavailable");
   });
 
-  it("accepts supported VariaQ 0.5 patch versions without a warning", async () => {
-    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.5.2");
+  it("accepts supported VariaQ 0.6 patch versions without a warning", async () => {
+    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.6.2");
     const h = await setup();
     const status = JSON.parse(String(await tool(h, "variaq_status", {})));
     expect(status.variaq.compatibility.supported).toBe(true);
     expect(status.variaq.compatibility.warning).toBeNull();
   });
 
-  it("reports 0.4 series as unsupported", async () => {
-    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.4.2");
+  it("reports 0.5 series as unsupported", async () => {
+    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.5.2");
     const h = await setup();
     const status = JSON.parse(String(await tool(h, "variaq_status", {})));
     expect(status.variaq.compatibility.supported).toBe(false);
-    expect(status.variaq.compatibility.warning).toMatch(/Unsupported VariaQ version 0\.4\.2/);
+    expect(status.variaq.compatibility.warning).toMatch(/Unsupported VariaQ version 0\.5\.2/);
   });
 });
 
@@ -308,6 +311,206 @@ describe("solve via fake CLI", () => {
     expect(cliResult.exitCode).toBe(1);
     expect(String(cliResult.stderr)).toContain("timed out");
   }, 20_000);
+});
+
+describe("campaign tools", () => {
+  const tinyCampaign = {
+    campaign_format_version: "1",
+    name: "maxcut-tiny",
+    family: "maxcut",
+    problem_sizes: [4],
+    problem_seeds: [1],
+    solvers: ["exact", "heuristic"],
+    repeats: 1,
+    base_seed: 42,
+    generator_parameters: { edge_probability: 0.4 },
+    solver_config: {},
+  };
+
+  it("plans a campaign without executing solvers", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(await tool(h, "variaq_campaign_plan", tinyCampaign)));
+    expect(result.plan.requested_runs).toBe(2);
+    expect(result.plan.exceeds_default_max).toBe(false);
+    expect(result.plan.solver_breakdown).toHaveLength(2);
+    expect(result.warnings).toEqual([]);
+    expect(result).not.toHaveProperty("tempFile");
+  });
+
+  it("preserves run-count warning in plan", async () => {
+    const h = await setup();
+    const big = { ...tinyCampaign, problem_sizes: [4, 6, 8, 10, 12, 14, 16, 18, 20], problem_seeds: [1, 2, 3, 4, 5, 6], solvers: ["exact", "heuristic", "qaoa"], repeats: 4 };
+    const result = JSON.parse(String(await tool(h, "variaq_campaign_plan", big)));
+    expect(result.plan.requested_runs).toBeGreaterThan(500);
+    expect(result.plan.exceeds_default_max).toBe(true);
+    expect(result.plan.warnings.some((w: string) => w.includes("default maximum"))).toBe(true);
+  });
+
+  it("runs a campaign and preserves mixed status summary", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(await tool(h, "variaq_campaign_run", { ...tinyCampaign, maxRuns: 10, overrideMaxRuns: false })));
+    expect(result.exitCode).toBe(0);
+    expect(result.campaignId).toMatch(/^campaign-/);
+    expect(result.summary.status_summary).toMatchObject({ success: expect.any(Number), failed: 1, skipped: 1, unavailable: 0 });
+  });
+
+  it("refuses to run a campaign exceeding max-runs without override", async () => {
+    const h = await setup();
+    const big = { ...tinyCampaign, problem_sizes: [4, 6, 8, 10, 12, 14, 16, 18], problem_seeds: [1, 2, 3, 4, 5, 6], solvers: ["exact", "heuristic", "qaoa"], repeats: 4 };
+    const result = JSON.parse(String(await tool(h, "variaq_campaign_run", { ...big, maxRuns: 500, overrideMaxRuns: false })));
+    expect(result.exitCode).toBe(2);
+    expect(result.error?.type).toBe("ValidationError");
+    expect(result.error?.message).toMatch(/exceeding maximum/);
+  });
+
+  it("lists and shows campaigns", async () => {
+    const h = await setup();
+    const run = JSON.parse(String(await tool(h, "variaq_campaign_run", { ...tinyCampaign, name: "listable", maxRuns: 10, overrideMaxRuns: false })));
+    const list = JSON.parse(String(await tool(h, "variaq_campaign_list", { limit: 10 })));
+    expect(list.campaigns.some((c: { campaign_id: string }) => c.campaign_id === run.campaignId)).toBe(true);
+    const show = JSON.parse(String(await tool(h, "variaq_campaign_show", { campaignId: run.campaignId })));
+    expect(show.campaign.name).toBe("listable");
+  });
+
+  it("rejects malformed campaign JSON via CLI", async () => {
+    const h = await setup();
+    const cliResult = await cli(h, ["campaign-plan", JSON.stringify({ campaign_format_version: "1", name: "bad" })]);
+    expect(cliResult.exitCode).toBe(1);
+    expect(String(cliResult.stderr)).toMatch(/Invalid campaign definition/);
+  });
+
+  it("formats campaign plan and run output concisely for humans", async () => {
+    const h = await setup();
+    const plan = await cli(h, ["campaign-plan", JSON.stringify(tinyCampaign)]);
+    expect(plan.stdout).toContain("Campaign plan: maxcut-tiny");
+    expect(plan.stdout).toContain("requested runs: 2");
+    expect(plan.stdout).not.toContain('"solver_breakdown"');
+    const run = await cli(h, ["campaign-run", JSON.stringify(tinyCampaign), "--max-runs", "10"]);
+    expect(run.stdout).toContain("Campaign run: campaign-");
+    expect(run.stdout).toContain("failed: 1, skipped: 1");
+    expect(run.stdout).not.toContain('"status_summary"');
+  });
+});
+
+describe("analyze tools", () => {
+  it("analyzes runs and preserves source_run_ids", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(await tool(h, "variaq_analyze_runs", {
+      run_ids: ["run-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      group_by: ["solver"],
+      scaling_x: "problem_size",
+    })));
+    expect(result.analysis.source_run_ids).toContain("run-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(result.analysis.groups).toHaveLength(1);
+    expect(result.analysis.scaling_points).toHaveLength(1);
+    expect(result.analysis.scaling_points[0].x_value).toBe(4);
+  });
+
+  it("null metrics remain null", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(await tool(h, "variaq_analyze_runs", { run_ids: ["run-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"] })));
+    expect(result.analysis.groups[0].feasibility.feasible_sample_count).toBeNull();
+    expect(result.analysis.groups[0].resource.qubits).toBeNull();
+  });
+
+  it("formats analysis output as a compact summary", async () => {
+    const h = await setup();
+    const result = await cli(h, [
+      "analyze-runs",
+      "--run-id",
+      "run-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "--group-by",
+      "solver",
+    ]);
+    expect(result.stdout).toContain("Analysis");
+    expect(result.stdout).toContain("source runs: 1");
+    expect(result.stdout).toContain("groups: 1");
+    expect(result.stdout).not.toContain('"analysis"');
+  });
+});
+
+describe("report campaign", () => {
+  it("generates JSON/CSV/Markdown files and preserves report_id", async () => {
+    const h = await setup();
+    const run = JSON.parse(String(await tool(h, "variaq_campaign_run", {
+      campaign_format_version: "1",
+      name: "reportable",
+      family: "maxcut",
+      problem_sizes: [4],
+      problem_seeds: [1],
+      solvers: ["exact"],
+      repeats: 1,
+      base_seed: 42,
+      generator_parameters: {},
+      solver_config: {},
+      maxRuns: 10,
+    })));
+    const result = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId,
+      outputDir: "test-reports",
+      formats: ["json", "csv", "markdown"],
+    })));
+    expect(result.reportId).toMatch(/^report-/);
+    expect(result.paths.json).toContain("report-");
+    expect(result.outputDir).toContain("test-reports");
+  });
+
+  it("rejects traversal outputDir", async () => {
+    const h = await setup();
+    const result = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: "campaign-doesnotmatter",
+      outputDir: "../../outside",
+      formats: ["json"],
+    })));
+    expect(result.error).toMatch(/outside the allowed report root/);
+  });
+
+  it("uses a stable default root and requires explicit overwrite", async () => {
+    const h = await setup({ reportOutputDir: "" });
+    const input = {
+      campaignId: "campaign-stable-report",
+      outputDir: "repeat",
+      formats: ["json"],
+    };
+    const first = JSON.parse(String(await tool(h, "variaq_report_campaign", input)));
+    expect(first.reportId).toMatch(/^report-/);
+    const second = JSON.parse(String(await tool(h, "variaq_report_campaign", input)));
+    expect(second.error).toMatch(/already exists/);
+    const replaced = JSON.parse(String(await tool(h, "variaq_report_campaign", { ...input, overwrite: true })));
+    expect(replaced.reportId).toBe(first.reportId);
+  });
+
+  it("rejects a symlink component beneath the report root", async () => {
+    const base = mkdtempSync(join(tmpdir(), "variaq-report-link-"));
+    temps.push(base);
+    const reportRoot = join(base, "reports");
+    const outside = join(base, "outside");
+    mkdirSync(reportRoot);
+    mkdirSync(outside);
+    symlinkSync(outside, join(reportRoot, "escape"));
+    const h = await setup({ reportOutputDir: reportRoot });
+    const result = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: "campaign-doesnotmatter",
+      outputDir: "escape/nested",
+      formats: ["json"],
+    })));
+    expect(result.error).toMatch(/symbolic link/);
+  });
+
+  it("formats report output as a compact file summary", async () => {
+    const h = await setup();
+    const result = await cli(h, [
+      "report-campaign",
+      "campaign-human-output",
+      "--output-dir",
+      "human-output",
+      "--formats",
+      "json,markdown",
+    ]);
+    expect(result.stdout).toContain("Report: report-");
+    expect(result.stdout).toContain("generated files: 2");
+    expect(result.stdout).not.toContain('"paths"');
+  });
 });
 
 describe("benchmark", () => {

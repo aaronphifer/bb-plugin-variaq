@@ -44,6 +44,7 @@ async function setupHost() {
     projectDir: VARIAQ_PROJECT,
     dbPath: join(tmp, "exp.db"),
     problemsDir: join(tmp, "problems"),
+    reportOutputDir: join(tmp, "reports"),
     timeoutMs: 180_000,
   });
   return h;
@@ -62,7 +63,7 @@ describeReal("plugin registration", () => {
     const h = await setupHost();
     const version = await cli(h, ["version"]);
     expect(version.exitCode).toBe(0);
-    expect(version.stdout).toContain("variaq 0.5.0");
+    expect(version.stdout).toContain("variaq 0.6.0");
   });
 });
 
@@ -72,7 +73,7 @@ describeReal("status/version", () => {
     const result = await tool(h, "variaq_status", {});
     const s = JSON.parse(String(result));
     expect(s.variaq.installed).toBe(true);
-    expect(s.variaq.version).toBe("0.5.0");
+    expect(s.variaq.version).toBe("0.6.0");
     expect(s.variaq.schema_version).toBe("1");
     expect(s.variaq.python).toBe(VARIAQ_PYTHON);
     expect(s.solvers.exact).toBe("available");
@@ -345,6 +346,72 @@ describeReal("problem import", () => {
     expect(result.problem.family).toBe("assignment");
     expect(result.problem.problem_id).toBeDefined();
     expect(result.problem.task_ids).toContain("task-0");
+  });
+});
+
+describeReal("campaign, analysis, and report integration", () => {
+  it("plans and runs a bounded campaign, analyzes it, and writes provenance-preserving reports", async () => {
+    const h = await setupHost();
+    const campaign = {
+      campaign_format_version: "1",
+      name: "ci-maxcut-scaling",
+      family: "maxcut",
+      problem_sizes: [4, 5],
+      problem_seeds: [1],
+      solvers: ["exact", "heuristic"],
+      repeats: 1,
+      base_seed: 42,
+      generator_parameters: { edge_probability: 0.4 },
+      solver_config: {},
+    };
+
+    const plan = JSON.parse(String(await tool(h, "variaq_campaign_plan", campaign)));
+    expect(plan.plan.requested_runs).toBe(4);
+    expect(plan.plan.exceeds_default_max).toBe(false);
+    expect(plan.plan.solver_breakdown).toHaveLength(2);
+    expect(plan).not.toHaveProperty("tempFile");
+
+    const run = JSON.parse(String(await tool(h, "variaq_campaign_run", {
+      ...campaign,
+      maxRuns: 10,
+      overrideMaxRuns: false,
+    })));
+    expect(run.exitCode).toBe(0);
+    expect(run.campaignId).toMatch(/^campaign-/);
+    expect(run.summary.requested_runs).toBe(4);
+    expect(run.summary.completed_runs).toBe(4);
+    expect(run.summary.status_summary).toEqual({ success: 4, failed: 0, skipped: 0, unavailable: 0 });
+
+    const analysis = JSON.parse(String(await tool(h, "variaq_analyze_campaign", {
+      campaignId: run.campaignId,
+      group_by: ["solver"],
+      scaling_x: "problem_size",
+      include_failed: true,
+      include_unavailable: true,
+    })));
+    expect(analysis.analysis.source_run_ids).toEqual(expect.arrayContaining(run.summary.run_ids));
+    expect(analysis.analysis.groups.length).toBeGreaterThan(0);
+    expect(analysis.analysis.scaling_points.length).toBeGreaterThan(0);
+    expect(analysis.analysis.groups[0].environment_versions.variaq).toContain("0.6.0");
+
+    const report = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId,
+      outputDir: "ci-smoke",
+      formats: ["json", "csv", "markdown"],
+      groupBy: ["solver"],
+      scalingX: "problem_size",
+    })));
+    expect(report.reportId).toMatch(/^report-/);
+    expect(report.paths.csv.groups).toBeTruthy();
+    expect(report.paths.markdown).toBeTruthy();
+    const reportDocument = JSON.parse(readFileSync(report.paths.json as string, "utf8"));
+    expect(reportDocument.report_id).toBe(report.reportId);
+    expect(reportDocument.campaign_id).toBe(run.campaignId);
+    expect(reportDocument.source_run_ids).toEqual(expect.arrayContaining(run.summary.run_ids));
+    expect(reportDocument.report_format_version).toBe("1");
+    expect(reportDocument.variaq_version).toBe("0.6.0");
+    expect(reportDocument.generated_at).toBeTruthy();
+    expect(reportDocument.analysis.query.campaign_id).toBe(run.campaignId);
   });
 });
 
