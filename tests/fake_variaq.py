@@ -378,7 +378,7 @@ def main(argv):
             ])
         if "markdown" in formats:
             prospective_paths.append(os.path.join(output_dir, f"{report_id}.md"))
-        if plots and "plots" in formats:
+        if "plots" in formats:
             prospective_paths.append(os.path.join(output_dir, f"{report_id}_plot.png"))
         if not overwrite and any(os.path.exists(p) for p in prospective_paths):
             print(json.dumps(envelope("report campaign", "error", None, error={
@@ -412,7 +412,7 @@ def main(argv):
             with open(md_path, "w") as f:
                 f.write(f"# Report {report_id}\n")
             paths["markdown"] = md_path
-        if plots and "plots" in formats:
+        if "plots" in formats:
             plot_path = os.path.join(output_dir, f"{report_id}_plot.png")
             with open(plot_path, "wb") as f:
                 f.write(b"PNG")

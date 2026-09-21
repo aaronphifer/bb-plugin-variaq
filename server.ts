@@ -557,6 +557,22 @@ export default async function plugin(bb: BbPluginApi) {
 
   // ------------------------------------------------------------------ reports --
 
+  /**
+   * Canonicalize the requested report formats. `formats` is the canonical set;
+   * `plots: true` is a compatibility alias that ensures "plots" appears once.
+   * The result is deterministic, de-duplicated, and ordered.
+   */
+  function canonicalizeReportFormats(
+    formats: ("json" | "csv" | "markdown" | "plots")[],
+    plots?: boolean,
+  ): ("json" | "csv" | "markdown" | "plots")[] {
+    const unique = new Set(formats);
+    if (plots) unique.add("plots");
+    // Preserve a stable, predictable order regardless of input order.
+    const order: ("json" | "csv" | "markdown" | "plots")[] = ["json", "csv", "markdown", "plots"];
+    return order.filter((f) => unique.has(f));
+  }
+
   async function opReportCampaign(
     campaignId: string,
     options: {
@@ -573,13 +589,15 @@ export default async function plugin(bb: BbPluginApi) {
     const root = resolveReportOutputDir(c);
     const containedDir = await resolveContainedReportDir(root, options.outputDir);
 
-    const argv = ["report", "campaign", campaignId, "--output-dir", containedDir, "--formats", options.formats.join(",")];
+    const formats = canonicalizeReportFormats(options.formats, options.plots);
+
+    const argv = ["report", "campaign", campaignId, "--output-dir", containedDir, "--formats", formats.join(",")];
     if (options.groupBy !== undefined) {
       for (const key of options.groupBy) argv.push("--group-by", key);
     }
     if (options.scalingX !== undefined) argv.push("--scaling-x", options.scalingX);
     if (options.compare !== undefined) argv.push("--compare", options.compare);
-    if (options.plots) argv.push("--plots");
+    // `--plots` is conveyed only through the canonical formats list.
     if (options.overwrite) argv.push("--overwrite");
 
     const result = await runVariaqJson(c, argv, { timeoutMs: 60_000 });
