@@ -1,12 +1,12 @@
 import { z } from "zod";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import crypto from "node:crypto";
-import { problemFamilySchema, type ProblemFamily } from "./lib/schema.js";
+import { problemFamilySchema, type ProblemFamily, campaignDefinitionSchema, campaignPlanDataSchema, campaignRunDataSchema, campaignListItemSchema, analyzeQuerySchema, reportFormatsSchema, type CampaignDefinition } from "./lib/schema.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { PluginError, checkVariaqVersion, generateProblemArgv, parseJsonOutput, parseKeyValue, parseSolvers, probeCapabilities, quantumSupportNote, requireSuccess, resolveConfig, runVariaqJson, runVariaqStrict, solverSupportsFamily, statusFromCapabilities } from "./lib/runner.js";
-import type { ResolvedConfig, VariaqSettings, CompareQuantumEnvelopeData, BenchmarkEnvelopeData, ReproduceEnvelopeData, ProblemGenerateData, SolveEnvelopeData, FamilyGenerateInput, VariaqSolver } from "./lib/runner.js";
+import type { ResolvedConfig, VariaqSettings, CompareQuantumEnvelopeData, BenchmarkEnvelopeData, ReproduceEnvelopeData, ProblemGenerateData, SolveEnvelopeData, FamilyGenerateInput, VariaqSolver, CampaignPlanEnvelopeData, CampaignRunEnvelopeData, CampaignListEnvelopeData, CampaignShowEnvelopeData, AnalyzeEnvelopeData, ReportCampaignEnvelopeData } from "./lib/runner.js";
 
 const SOLVERS = ["exact", "heuristic", "qaoa", "cudaq-cpu", "cudaq-gpu"] as const;
 const VARIAQ_SOLVERS = SOLVERS;
@@ -22,11 +22,19 @@ const USAGE = `bb variaq — Run VariaQ classical/quantum experiments from bb
   bb variaq solve <problem-id> --solver <${SOLVERS.join("|")}> [--seed S] [--param KEY=VALUE ...] [--json]
   bb variaq benchmark <problem-id> [--solvers a,b] [--repeats N] [--seed S] [--json]
   bb variaq compare-quantum <problem-id> [--p N] [--repeats N] [--json]
+  bb variaq campaign-plan <campaign-json-content> [--json]
+  bb variaq campaign-run <campaign-json-content> [--max-runs N] [--override-max-runs] [--json]
+  bb variaq campaigns [--limit N] [--json]
+  bb variaq campaign <campaign-id> [--json]
+  bb variaq analyze-runs [--run-id ID ...] [--group-by KEY ...] [--filter KEY=VALUE ...] [--scaling-x METRIC] [--include-failed] [--include-unavailable] [--compare COMPARISON] [--json]
+  bb variaq analyze-campaign <campaign-id> [--group-by KEY ...] [--scaling-x METRIC] [--include-failed] [--include-unavailable] [--compare COMPARISON] [--json]
+  bb variaq report-campaign <campaign-id> --output-dir DIR --formats f1,f2 [--group-by KEY ...] [--scaling-x METRIC] [--plots] [--overwrite] [--json]
   bb variaq runs [--limit N] [--json]
   bb variaq run <run-id> [--json]
   bb variaq reproduce <run-id> [--json]
 
-Problem families: maxcut, assignment, subset-selection, graph-partition.
+Campaign tools are read-only (plan/analyze) or execute solver runs (run).
+Reports create files under the configured report output directory.
 
 This plugin shells out to the standalone VariaQ CLI. Solver/quantum logic
 lives in VariaQ — never here. Quantum solver availability and supported
@@ -62,6 +70,12 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Directory for saved problem JSON. Leave empty to use VariaQ's built-in default (<checkout>/data/problems).",
       default: "",
     },
+    reportOutputDir: {
+      type: "string",
+      label: "Report output directory",
+      description: "Directory for generated campaign reports. Leave empty to use a safe default under the project workspace.",
+      default: "",
+    },
     timeoutMs: {
       type: "number",
       label: "Command timeout (ms)",
@@ -78,6 +92,7 @@ export default async function plugin(bb: BbPluginApi) {
       projectDir: values.projectDir,
       dbPath: values.dbPath,
       problemsDir: values.problemsDir,
+      reportOutputDir: values.reportOutputDir,
       timeoutMs: values.timeoutMs,
     };
     return resolveConfig(raw);
@@ -359,6 +374,225 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
+  // Helpers for safe temporary file handling and report path containment.
+
+  async function writeCampaignTemp(c: ResolvedConfig, definition: CampaignDefinition): Promise<string> {
+    const workDir = c.problemsDir ?? tmpdir();
+    await fs.mkdir(workDir, { recursive: true });
+    const tempFile = join(workDir, `campaign-${crypto.randomUUID()}.json`);
+    await fs.writeFile(tempFile, JSON.stringify(definition, null, 2), "utf8");
+    return tempFile;
+  }
+
+  function resolveReportOutputDir(c: ResolvedConfig): string {
+    if (c.reportOutputDir !== null) return c.reportOutputDir;
+    // Keep the default stable so reports remain discoverable and VariaQ's
+    // overwrite protection applies across separate plugin calls.
+    return join(c.projectDir, "reports");
+  }
+
+  /**
+   * Ensure `outputDir` is contained within `root`. Rejects traversal attempts,
+   * absolute paths outside root, and symlinks that escape root.
+   */
+  async function resolveContainedReportDir(root: string, outputDir: string): Promise<string> {
+    await fs.mkdir(root, { recursive: true });
+    const absRoot = await fs.realpath(resolve(root));
+    const candidate = resolve(absRoot, outputDir);
+    const relativeCandidate = relative(absRoot, candidate);
+    if (
+      relativeCandidate === ".." ||
+      relativeCandidate.startsWith(`..${sep}`) ||
+      isAbsolute(relativeCandidate)
+    ) {
+      throw new PluginError(
+        `Report output directory '${outputDir}' is outside the allowed report root.`,
+        "Use a relative path beneath the configured report output directory, or ask the user to change the reportOutputDir setting.",
+      );
+    }
+
+    // Walk one component at a time and reject symlinks. Resolving only the
+    // complete candidate is unsafe when its final component does not yet
+    // exist but an existing parent symlink escapes the root.
+    let current = absRoot;
+    for (const part of relativeCandidate.split(sep).filter(Boolean)) {
+      current = join(current, part);
+      try {
+        const stat = await fs.lstat(current);
+        if (stat.isSymbolicLink()) {
+          throw new PluginError(
+            `Report output directory '${outputDir}' contains a symbolic link.`,
+            "Use a real directory beneath the configured report output directory.",
+          );
+        }
+        if (!stat.isDirectory()) {
+          throw new PluginError(`Report output directory '${outputDir}' is not a directory.`);
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        await fs.mkdir(current);
+      }
+    }
+    return current;
+  }
+
+  // ------------------------------------------------------------------ campaigns --
+
+  async function opCampaignPlan(definition: CampaignDefinition) {
+    const c = await cfg();
+    const validated = campaignDefinitionSchema.parse(definition);
+    const tempFile = await writeCampaignTemp(c, validated);
+    try {
+      const result = await runVariaqJson(c, ["campaign", "plan", tempFile], { timeoutMs: 30_000 });
+      const envelope = requireSuccess(result, ["campaign", "plan"]);
+      const { data, warnings } = successData<CampaignPlanEnvelopeData>(envelope, "campaign plan");
+      return { plan: campaignPlanDataSchema.parse(data), warnings };
+    } finally {
+      try {
+        await fs.unlink(tempFile);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  async function opCampaignRun(definition: CampaignDefinition, maxRuns: number, overrideMaxRuns: boolean) {
+    const c = await cfg();
+    const validated = campaignDefinitionSchema.parse(definition);
+    const tempFile = await writeCampaignTemp(c, validated);
+    try {
+      const argv = ["campaign", "run", tempFile, "--max-runs", String(maxRuns)];
+      if (overrideMaxRuns) argv.push("--override-max-runs");
+      const result = await runVariaqJson(c, argv);
+      if (result.code !== 0) {
+        return {
+          exitCode: result.code,
+          timedOut: result.timedOut,
+          campaignId: undefined,
+          summary: undefined,
+          error: result.envelope.error,
+          warnings: result.envelope.warnings,
+          stderr: null,
+        };
+      }
+      const envelope = result.envelope;
+      const { data, warnings } = successData<CampaignRunEnvelopeData>(envelope, "campaign run");
+      return {
+        exitCode: result.code,
+        timedOut: result.timedOut,
+        campaignId: data.campaign_id,
+        summary: campaignRunDataSchema.parse(data),
+        error: undefined,
+        warnings,
+        stderr: null,
+      };
+    } finally {
+      try {
+        await fs.unlink(tempFile);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  async function opCampaignList(limit: number) {
+    const c = await cfg();
+    const result = await runVariaqJson(c, ["campaign", "list", "--limit", String(limit)], { timeoutMs: 15_000 });
+    const envelope = requireSuccess(result, ["campaign", "list"]);
+    const { data, warnings } = successData<unknown[]>(envelope, "campaign list");
+    const campaigns = (data as Record<string, unknown>[]).map((item) => campaignListItemSchema.parse(item));
+    return { campaigns, warnings };
+  }
+
+  async function opCampaignShow(campaignId: string) {
+    const c = await cfg();
+    const result = await runVariaqJson(c, ["campaign", "show", campaignId], { timeoutMs: 15_000 });
+    const envelope = requireSuccess(result, ["campaign", "show", campaignId]);
+    const { data, warnings } = successData<CampaignShowEnvelopeData>(envelope, "campaign show");
+    return { campaignId, campaign: data, warnings };
+  }
+
+  // ------------------------------------------------------------------ analysis --
+
+  function buildAnalyzeArgv(kind: "runs" | "campaign", query: import("./lib/schema.js").AnalyzeQuery): string[] {
+    const argv: string[] = ["analyze", kind];
+    if (kind === "runs" && query.run_ids !== undefined && query.run_ids.length > 0) {
+      for (const id of query.run_ids) argv.push("--run-id", id);
+    }
+    if (kind === "campaign" && query.campaign_id !== undefined) {
+      argv.push(query.campaign_id);
+    }
+    if (query.group_by !== undefined) {
+      for (const key of query.group_by) argv.push("--group-by", key);
+    }
+    if (query.filters !== undefined) {
+      for (const [k, v] of Object.entries(query.filters)) argv.push("--filter", `${k}=${v}`);
+    }
+    if (query.scaling_x !== undefined) argv.push("--scaling-x", query.scaling_x);
+    if (query.include_failed) argv.push("--include-failed");
+    if (query.include_unavailable) argv.push("--include-unavailable");
+    if (query.compare !== undefined) argv.push("--compare", query.compare);
+    return argv;
+  }
+
+  async function opAnalyzeRuns(query: import("./lib/schema.js").AnalyzeQuery) {
+    const c = await cfg();
+    const validated = analyzeQuerySchema.parse(query);
+    const argv = buildAnalyzeArgv("runs", validated);
+    const result = await runVariaqJson(c, argv, { timeoutMs: 60_000 });
+    const envelope = requireSuccess(result, ["analyze", "runs"]);
+    const { data, warnings } = successData<AnalyzeEnvelopeData>(envelope, "analyze runs");
+    return { analysis: data, warnings };
+  }
+
+  async function opAnalyzeCampaign(campaignId: string, query: Omit<import("./lib/schema.js").AnalyzeQuery, "campaign_id">) {
+    const c = await cfg();
+    const fullQuery = analyzeQuerySchema.parse({ ...query, campaign_id: campaignId });
+    const argv = buildAnalyzeArgv("campaign", fullQuery);
+    const result = await runVariaqJson(c, argv, { timeoutMs: 60_000 });
+    const envelope = requireSuccess(result, ["analyze", "campaign"]);
+    const { data, warnings } = successData<AnalyzeEnvelopeData>(envelope, "analyze campaign");
+    return { analysis: data, warnings };
+  }
+
+  // ------------------------------------------------------------------ reports --
+
+  async function opReportCampaign(
+    campaignId: string,
+    options: {
+      outputDir: string;
+      formats: ["json" | "csv" | "markdown" | "plots", ...("json" | "csv" | "markdown" | "plots")[]];
+      groupBy?: string[];
+      scalingX?: string;
+      compare?: "classical_vs_quantum" | "qiskit_vs_cudaq" | "gpu_vs_cpu";
+      plots?: boolean;
+      overwrite?: boolean;
+    },
+  ) {
+    const c = await cfg();
+    const root = resolveReportOutputDir(c);
+    const containedDir = await resolveContainedReportDir(root, options.outputDir);
+
+    const argv = ["report", "campaign", campaignId, "--output-dir", containedDir, "--formats", options.formats.join(",")];
+    if (options.groupBy !== undefined) {
+      for (const key of options.groupBy) argv.push("--group-by", key);
+    }
+    if (options.scalingX !== undefined) argv.push("--scaling-x", options.scalingX);
+    if (options.compare !== undefined) argv.push("--compare", options.compare);
+    if (options.plots) argv.push("--plots");
+    if (options.overwrite) argv.push("--overwrite");
+
+    const result = await runVariaqJson(c, argv, { timeoutMs: 60_000 });
+    const envelope = requireSuccess(result, ["report", "campaign"]);
+    const { data, warnings } = successData<ReportCampaignEnvelopeData>(envelope, "report campaign");
+    return {
+      reportId: data.report_id,
+      paths: data.paths,
+      outputDir: containedDir,
+      warnings,
+    };
+  }
+
   const errorResult = (err: unknown): string => {
     if (err instanceof PluginError) {
       return JSON.stringify(
@@ -403,6 +637,33 @@ export default async function plugin(bb: BbPluginApi) {
         name: "compare-quantum",
         summary: "Run matched Qiskit/CUDA-Q QAOA comparison on a family supported by the selected quantum solvers",
         usage: "bb variaq compare-quantum <problem-id> [--p N] [--repeats N] [--json]",
+      },
+      {
+        name: "campaign-plan",
+        summary: "Preview a campaign without executing any solver runs",
+        usage: "bb variaq campaign-plan <campaign-json-content> [--json]",
+      },
+      {
+        name: "campaign-run",
+        summary: "Execute a campaign: generates problems and runs all configured solvers",
+        usage: "bb variaq campaign-run <campaign-json-content> [--max-runs N] [--override-max-runs] [--json]",
+      },
+      { name: "campaigns", summary: "List stored campaigns", usage: "bb variaq campaigns [--limit N] [--json]" },
+      { name: "campaign", summary: "Show a stored campaign definition", usage: "bb variaq campaign <campaign-id> [--json]" },
+      {
+        name: "analyze-runs",
+        summary: "Analyze a bounded set of stored experiment runs",
+        usage: "bb variaq analyze-runs [--run-id ID ...] [--group-by KEY ...] [--filter KEY=VALUE ...] [--scaling-x METRIC] [--include-failed] [--include-unavailable] [--compare COMPARISON] [--json]",
+      },
+      {
+        name: "analyze-campaign",
+        summary: "Analyze all runs belonging to a campaign",
+        usage: "bb variaq analyze-campaign <campaign-id> [--group-by KEY ...] [--scaling-x METRIC] [--include-failed] [--include-unavailable] [--compare COMPARISON] [--json]",
+      },
+      {
+        name: "report-campaign",
+        summary: "Generate JSON/CSV/Markdown (optionally plots) report files for a campaign",
+        usage: "bb variaq report-campaign <campaign-id> --output-dir DIR --formats f1,f2 [--group-by KEY ...] [--scaling-x METRIC] [--plots] [--overwrite] [--json]",
       },
       { name: "runs", summary: "List recent experiment runs", usage: "bb variaq runs [--limit N] [--json]" },
       { name: "run", summary: "Show one experiment run as JSON", usage: "bb variaq run <run-id> [--json]" },
@@ -513,6 +774,68 @@ export default async function plugin(bb: BbPluginApi) {
               problemId: problem,
               p: optionalInt(opts, "p", 1),
               repeats: optionalInt(opts, "repeats", 1),
+            });
+          }
+          case "campaign-plan": {
+            const content = requiredPositional(args, "campaign-json-content");
+            const definition = parseCampaignJson(content);
+            return opCampaignPlan(definition);
+          }
+          case "campaign-run": {
+            const content = requiredPositional(args, "campaign-json-content");
+            const definition = parseCampaignJson(content);
+            const opts = readOptions(args);
+            const maxRuns = optionalInt(opts, "max-runs", 500);
+            const overrideMaxRuns = opts.has("override-max-runs");
+            return opCampaignRun(definition, maxRuns, overrideMaxRuns);
+          }
+          case "campaigns": {
+            const opts = readOptions(args);
+            return opCampaignList(optionalInt(opts, "limit", 20));
+          }
+          case "campaign":
+            return opCampaignShow(requiredPositional(args, "campaign-id"));
+          case "analyze-runs": {
+            const runIds = collectRepeated(args, "--run-id");
+            const groupBy = collectRepeated(args, "--group-by");
+            const filters = collectRepeated(args, "--filter").map((kv) => parseKeyValue(kv, "--filter"));
+            const opts = readOptions(args);
+            return opAnalyzeRuns({
+              run_ids: runIds.length > 0 ? runIds : undefined,
+              group_by: groupBy.length > 0 ? groupBy : undefined,
+              filters: filters.length > 0 ? Object.fromEntries(filters) : undefined,
+              scaling_x: opts.get("scaling-x"),
+              include_failed: args.includes("--include-failed"),
+              include_unavailable: args.includes("--include-unavailable"),
+              compare: opts.get("compare") as import("./lib/schema.js").AnalyzeQuery["compare"],
+            });
+          }
+          case "analyze-campaign": {
+            const campaignId = requiredPositional(args, "campaign-id");
+            const groupBy = collectRepeated(args, "--group-by");
+            const opts = readOptions(args);
+            return opAnalyzeCampaign(campaignId, {
+              group_by: groupBy.length > 0 ? groupBy : undefined,
+              scaling_x: opts.get("scaling-x"),
+              include_failed: args.includes("--include-failed"),
+              include_unavailable: args.includes("--include-unavailable"),
+              compare: opts.get("compare") as import("./lib/schema.js").AnalyzeQuery["compare"],
+            });
+          }
+          case "report-campaign": {
+            const campaignId = requiredPositional(args, "campaign-id");
+            const opts = readOptions(args);
+            const outputDir = requiredOption(opts, "output-dir");
+            const formats = requiredOption(opts, "formats").split(",").map((s) => s.trim()).filter(Boolean);
+            const groupBy = collectRepeated(args, "--group-by");
+            return opReportCampaign(campaignId, {
+              outputDir,
+              formats: formats as ["json" | "csv" | "markdown" | "plots", ...("json" | "csv" | "markdown" | "plots")[]],
+              groupBy: groupBy.length > 0 ? groupBy : undefined,
+              scalingX: opts.get("scaling-x"),
+              compare: opts.get("compare") as "classical_vs_quantum" | "qiskit_vs_cudaq" | "gpu_vs_cpu" | undefined,
+              plots: args.includes("--plots"),
+              overwrite: args.includes("--overwrite"),
             });
           }
           case "runs": {
@@ -764,6 +1087,138 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.agents.registerTool({
+    name: "variaq_campaign_plan",
+    description: "Plan a VariaQ campaign without executing any solver runs. Returns requested run counts, solver breakdown, and max-run warnings.",
+    instructions: "Use variaq_campaign_plan to preview a campaign before running it. Campaign plan is non-executing and safe. If the plan warns about exceeding the default run maximum, decide whether to reduce the campaign or explicitly pass maxRuns + overrideMaxRuns to variaq_campaign_run.",
+    parameters: campaignDefinitionSchema,
+    async execute(definition) {
+      try {
+        const result = await opCampaignPlan(definition);
+        return JSON.stringify(result, null, 2);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "variaq_campaign_run",
+    description: "Execute a VariaQ campaign: generate problem instances and run the configured solvers. This can run many solver invocations.",
+    instructions: "Use variaq_campaign_run after planning. Always prefer to call variaq_campaign_plan first. The tool respects VariaQ's max-run guard; campaigns that exceed the default maximum require an explicit maxRuns value and overrideMaxRuns=true. The plugin does not orchestrate solvers or bypass VariaQ's safety guard.",
+    parameters: campaignDefinitionSchema.extend({
+      maxRuns: z.number().int().min(1).max(10_000).optional().describe("Maximum runs allowed (default 500, matching VariaQ's safe default)"),
+      overrideMaxRuns: z.boolean().optional().describe("Set true to allow running a campaign whose requested_runs exceed maxRuns"),
+    }),
+    async execute(definition) {
+      try {
+        const { maxRuns, overrideMaxRuns, ...campaign } = definition as CampaignDefinition & { maxRuns?: number; overrideMaxRuns?: boolean };
+        const result = await opCampaignRun(campaign, maxRuns ?? 500, overrideMaxRuns ?? false);
+        return JSON.stringify(result, null, 2);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "variaq_campaign_list",
+    description: "List stored VariaQ campaigns (campaign_id, name, family, created_at).",
+    instructions: "Use variaq_campaign_list to discover campaigns before analyzing or reporting on one.",
+    parameters: z.object({
+      limit: z.number().int().min(1).max(500).optional().describe("Max campaigns to return (default 20)"),
+    }),
+    async execute({ limit }) {
+      try {
+        const result = await opCampaignList(limit ?? 20);
+        return JSON.stringify(result, null, 2);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "variaq_campaign_show",
+    description: "Show a stored VariaQ campaign definition by id.",
+    instructions: "Use variaq_campaign_show to inspect the full definition of a stored campaign before analyzing or reproducing it.",
+    parameters: z.object({
+      campaignId: z.string().min(1).describe("Campaign id"),
+    }),
+    async execute({ campaignId }) {
+      try {
+        const result = await opCampaignShow(campaignId);
+        return JSON.stringify(result, null, 2);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "variaq_analyze_runs",
+    description: "Analyze a bounded set of stored VariaQ experiment runs. Read-only; does not execute solvers or modify runs.",
+    instructions: "Use variaq_analyze_runs to compute VariaQ-derived quality, feasibility, timing, resource, and scaling summaries over run IDs. Analysis is read-only and returns VariaQ's AnalysisResult directly.",
+    parameters: analyzeQuerySchema.omit({ campaign_id: true }),
+    async execute(query) {
+      try {
+        const result = await opAnalyzeRuns(query);
+        return JSON.stringify(result, null, 2);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "variaq_analyze_campaign",
+    description: "Analyze all runs belonging to a VariaQ campaign. Read-only; does not execute solvers or modify runs.",
+    instructions: "Use variaq_analyze_campaign to compute VariaQ-derived quality, feasibility, timing, resource, and scaling summaries for a stored campaign. Analysis is read-only.",
+    parameters: z.object({
+      campaignId: z.string().min(1).describe("Campaign id"),
+    }).merge(analyzeQuerySchema.omit({ campaign_id: true, run_ids: true })),
+    async execute({ campaignId, ...query }) {
+      try {
+        const result = await opAnalyzeCampaign(campaignId, query);
+        return JSON.stringify(result, null, 2);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "variaq_report_campaign",
+    description: "Generate JSON/CSV/Markdown (and optional plots) report files for a VariaQ campaign. This tool writes files under the configured report output directory.",
+    instructions: "Use variaq_report_campaign to produce persistent report artifacts from a stored campaign. Reports derive from stored runs, preserve source_run_ids, and are written under the configured reportOutputDir. The outputDir argument is resolved relative to that root and cannot escape it.",
+    parameters: z.object({
+      campaignId: z.string().min(1).describe("Campaign id"),
+      outputDir: z.string().min(1).describe("Relative output directory beneath the configured report output root"),
+      formats: reportFormatsSchema.describe("Report formats, e.g. ['json', 'csv', 'markdown']"),
+      groupBy: z.array(z.string()).max(8).optional().describe("Group-by keys"),
+      scalingX: z.string().optional().describe("Scaling x-axis metric, e.g. problem_size"),
+      compare: z.enum(["classical_vs_quantum", "qiskit_vs_cudaq", "gpu_vs_cpu"]).optional(),
+      plots: z.boolean().optional().describe("Request matplotlib plots if available"),
+      overwrite: z.boolean().optional(),
+    }),
+    async execute({ campaignId, outputDir, formats, groupBy, scalingX, compare, plots, overwrite }) {
+      try {
+        const result = await opReportCampaign(campaignId, {
+          outputDir,
+          formats: formats as ["json" | "csv" | "markdown" | "plots", ...("json" | "csv" | "markdown" | "plots")[]],
+          groupBy,
+          scalingX,
+          compare,
+          plots,
+          overwrite,
+        });
+        return JSON.stringify(result, null, 2);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  });
+
+  bb.agents.registerTool({
     name: "variaq_runs_list",
     description: "List recent VariaQ experiment runs (run_id, problem, solver, status, objective, timing).",
     instructions: "Use variaq_runs_list to see recent experiment runs before inspecting one in detail.",
@@ -826,10 +1281,13 @@ function readOptions(args: string[]): Map<string, string> {
     if (a !== undefined && a.startsWith("--") && a !== "--param") {
       const next = args[i + 1];
       if (next === undefined || next.startsWith("--")) {
-        throw new PluginError(`Missing value for ${a}`);
+        // Boolean flag: store it with the empty string sentinel so it is still
+        // discoverable via has().
+        map.set(a.slice(2), "");
+      } else {
+        map.set(a.slice(2), next);
+        i++;
       }
-      map.set(a.slice(2), next);
-      i++;
     }
   }
   return map;
@@ -887,6 +1345,26 @@ function parseInteger(raw: string, name: string): number {
   return Number.parseInt(raw, 10);
 }
 
+function parseCampaignJson(content: string): CampaignDefinition {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch (err) {
+    throw new PluginError(
+      "Campaign content is not valid JSON.",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  const result = campaignDefinitionSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new PluginError(
+      `Invalid campaign definition: ${result.error.message}`,
+      "Campaign must declare campaign_format_version '1', a valid family, problem_sizes, problem_seeds, and solvers.",
+    );
+  }
+  return result.data;
+}
+
 function successData<T>(
   envelope: import("./lib/schema.js").ParsedEnvelope,
   command: string,
@@ -916,11 +1394,116 @@ function unwrapEnvelope<T = unknown>(
 }
 
 /** Human-readable default for the CLI; full JSON under --json. */
-/** Human-readable default for the CLI; full JSON under --json. */
 function formatCliOutput(value: unknown, json: boolean): string {
   if (json) return JSON.stringify(value, null, 2);
   if (typeof value !== "object" || value === null) return String(value);
   const record = value as Record<string, unknown>;
+
+  const warningLines = (...sources: unknown[]): string[] => {
+    const messages = sources
+      .flatMap((source) => Array.isArray(source) ? source : [])
+      .map((warning) => {
+        if (typeof warning === "string") return warning;
+        if (typeof warning === "object" && warning !== null && "message" in warning) {
+          return String((warning as { message: unknown }).message);
+        }
+        return JSON.stringify(warning);
+      });
+    return [...new Set(messages)].map((message) => `  warning: ${message}`);
+  };
+
+  if ("plan" in record && typeof record.plan === "object" && record.plan !== null) {
+    const plan = record.plan as Record<string, unknown>;
+    const solvers = (plan.solver_breakdown as Array<Record<string, unknown>> | undefined) ?? [];
+    return [
+      `Campaign plan: ${String(plan.name ?? "unnamed")}`,
+      `  family: ${String(plan.family ?? "unknown")}`,
+      `  requested runs: ${String(plan.requested_runs ?? "?")}`,
+      `  problem instances: ${String(plan.problem_instance_count ?? "?")}`,
+      `  exceeds default maximum: ${plan.exceeds_default_max === true ? "yes" : "no"}`,
+      `  solvers: ${solvers.map((solver) => `${String(solver.solver)}=${String(solver.requested_runs)}`).join(", ") || "none"}`,
+      ...warningLines(plan.warnings, record.warnings),
+    ].join("\n");
+  }
+
+  if ("campaignId" in record && "summary" in record && typeof record.summary === "object" && record.summary !== null) {
+    const summary = record.summary as Record<string, unknown>;
+    const statuses = (summary.status_summary as Record<string, unknown> | undefined) ?? {};
+    return [
+      `Campaign run: ${String(record.campaignId)}`,
+      `  name: ${String(summary.name ?? "unnamed")}`,
+      `  family: ${String(summary.family ?? "unknown")}`,
+      `  runs: ${String(summary.completed_runs ?? "?")}/${String(summary.requested_runs ?? "?")} completed`,
+      `  success: ${String(statuses.success ?? 0)}, failed: ${String(statuses.failed ?? 0)}, skipped: ${String(statuses.skipped ?? 0)}, unavailable: ${String(statuses.unavailable ?? 0)}`,
+      ...warningLines(record.warnings),
+    ].join("\n");
+  }
+
+  if ("campaigns" in record && Array.isArray(record.campaigns)) {
+    const campaigns = record.campaigns as Array<Record<string, unknown>>;
+    return [
+      `Campaigns: ${campaigns.length}`,
+      ...campaigns.map((campaign) =>
+        `  ${String(campaign.campaign_id)}  ${String(campaign.name)}  ${String(campaign.family)}  ${String(campaign.created_at)}`),
+      ...warningLines(record.warnings),
+    ].join("\n");
+  }
+
+  if ("campaign" in record && typeof record.campaign === "object" && record.campaign !== null) {
+    const campaign = record.campaign as Record<string, unknown>;
+    return [
+      `Campaign: ${String(record.campaignId ?? "unknown")}`,
+      `  name: ${String(campaign.name ?? "unnamed")}`,
+      `  family: ${String(campaign.family ?? "unknown")}`,
+      `  sizes: ${((campaign.problem_sizes as unknown[] | undefined) ?? []).join(", ")}`,
+      `  seeds: ${((campaign.problem_seeds as unknown[] | undefined) ?? []).join(", ")}`,
+      `  solvers: ${((campaign.solvers as unknown[] | undefined) ?? []).join(", ")}`,
+      `  repeats: ${String(campaign.repeats ?? "?")}`,
+      `  created: ${String(campaign.created_at ?? "unknown")}`,
+      ...warningLines(record.warnings),
+    ].join("\n");
+  }
+
+  if ("analysis" in record && typeof record.analysis === "object" && record.analysis !== null) {
+    const analysis = record.analysis as Record<string, unknown>;
+    const groups = (analysis.groups as Array<Record<string, unknown>> | undefined) ?? [];
+    const sourceRunIds = (analysis.source_run_ids as unknown[] | undefined) ?? [];
+    const scalingPoints = (analysis.scaling_points as unknown[] | undefined) ?? [];
+    const lines = [
+      "Analysis",
+      `  source runs: ${sourceRunIds.length}`,
+      `  groups: ${groups.length}`,
+      `  scaling points: ${scalingPoints.length}`,
+    ];
+    for (const group of groups.slice(0, 8)) {
+      const key = JSON.stringify(group.group_key ?? {});
+      const quality = (group.quality as Record<string, unknown> | undefined) ?? {};
+      const feasibility = (group.feasibility as Record<string, unknown> | undefined) ?? {};
+      lines.push(
+        `  ${key}: count=${String(group.count ?? "?")}, mean_objective=${String(quality.mean_objective ?? "null")}, feasible_runs=${String(feasibility.feasible_runs ?? "?")}`,
+      );
+    }
+    if (groups.length > 8) lines.push(`  … ${groups.length - 8} more groups`);
+    lines.push(...warningLines(analysis.warnings, record.warnings));
+    return lines.join("\n");
+  }
+
+  if ("reportId" in record && "paths" in record) {
+    const paths = record.paths as Record<string, unknown>;
+    const files: string[] = [];
+    for (const value of Object.values(paths)) {
+      if (typeof value === "string") files.push(value);
+      if (typeof value === "object" && value !== null) {
+        files.push(...Object.values(value as Record<string, unknown>).filter((entry): entry is string => typeof entry === "string"));
+      }
+    }
+    return [
+      `Report: ${String(record.reportId)}`,
+      `  generated files: ${files.length}`,
+      ...files.map((file) => `  ${file}`),
+      ...warningLines(record.warnings),
+    ].join("\n");
+  }
 
   if ("variaq" in record && "solvers" in record) {
     const status = value as {

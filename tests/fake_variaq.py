@@ -2,12 +2,13 @@
 """
 Deterministic stand-in for the VariaQ CLI used by bb-plugin-variaq tests.
 
-Emulates VariaQ 0.5.0 schema-v1 envelopes so tests can verify the plugin's
+Emulates VariaQ 0.6.0 schema-v1 envelopes so tests can verify the plugin's
 JSON contract without touching a real VariaQ install or solver.
 
 Recognized argv shape:
   python fake_variaq.py [--db P] [--problems-dir P] <command> <args...>
 """
+import hashlib
 import json
 import os
 import sys
@@ -15,11 +16,30 @@ import time
 import uuid
 
 OUTPUT_SCHEMA_VERSION = "1"
+DEFAULT_MAX_RUNS = 500
+FAKE_VARIAQ_VERSION = "0.6.0"
 
 FAMILIES = ["maxcut", "assignment", "subset-selection", "graph-partition"]
 CLASSICAL_FAMILIES = FAMILIES
-# VariaQ 0.5 advertises these quantum families dynamically; the fake mirrors that.
+# VariaQ 0.6 advertises these quantum families dynamically; the fake mirrors that.
 QUANTUM_FAMILIES = ["maxcut", "assignment", "subset-selection"]
+
+CAMPAIGNS = {}
+CAMPAIGN_STATE_FILE = os.environ.get("FAKE_CAMPAIGN_STATE", ".fake_campaigns.json")
+
+
+def _load_campaigns():
+    global CAMPAIGNS
+    try:
+        with open(CAMPAIGN_STATE_FILE) as f:
+            CAMPAIGNS = json.load(f)
+    except Exception:
+        CAMPAIGNS = {}
+
+
+def _save_campaigns():
+    with open(CAMPAIGN_STATE_FILE, "w") as f:
+        json.dump(CAMPAIGNS, f)
 
 
 def envelope(command, status, data, warnings=None, error=None):
@@ -38,6 +58,50 @@ def envelope(command, status, data, warnings=None, error=None):
 
 def fake_run_id():
     return f"run-{uuid.uuid4()}"
+
+
+def make_analysis_group(group_by, run_id, problem_size=4):
+    group_key = {k: (run_id if k == "run_id" else ("exact" if k == "solver" else f"{k}-value")) for k in group_by}
+    return {
+        "count": 1,
+        "environment_versions": {"variaq": [FAKE_VARIAQ_VERSION], "python": ["3.12.3"]},
+        "feasibility": {
+            "best_feasible_objective": 2.0,
+            "best_infeasible_energy": None,
+            "count": 1,
+            "feasible_runs": 1,
+            "feasible_sample_count": None,
+            "infeasible_runs": 0,
+            "infeasible_sample_count": None,
+            "max_feasible_rate": None,
+            "mean_feasible_rate": None,
+            "median_feasible_rate": None,
+            "min_feasible_rate": None,
+            "zero_feasible_runs": 0,
+        },
+        "group_key": group_key,
+        "problem_ids": ["maxcut-fake000000001"],
+        "quality": {
+            "approximation_ratio": 1.0,
+            "best_objective": 2.0,
+            "count": 1,
+            "mean_gap_percent": 0.0,
+            "mean_objective": 2.0,
+            "median_objective": 2.0,
+            "success_at_optimum_rate": 1.0,
+            "worst_objective": 2.0,
+        },
+        "resource": {"auxiliary_variables": None, "binary_variables": None, "circuit_depth": None, "count": 1, "estimated_statevector_bytes": None, "gate_count": None, "logical_variables": problem_size, "qubits": None},
+        "run_ids": [run_id],
+        "timing": {"count": 1, "expectation_evaluation_seconds": None, "initialization_seconds": None, "parameter_search_seconds": None, "sampling_seconds": None, "solver_time_seconds": None, "total_wall_time_seconds": None, "warmup_seconds": None},
+    }
+
+
+def make_scaling_point(group_by, run_id, x_metric, x_value):
+    point = make_analysis_group(group_by, run_id, problem_size=int(x_value))
+    point["x_metric"] = x_metric
+    point["x_value"] = float(x_value)
+    return point
 
 
 def supported_family(family):
@@ -79,12 +143,281 @@ def main(argv):
     cmd = args[0]
 
     if cmd == "--version":
-        version = os.environ.get("FAKE_VARIAQ_VERSION", "9.9.9")
+        version = os.environ.get("FAKE_VARIAQ_VERSION", FAKE_VARIAQ_VERSION)
         print(f"variaq {version}")
         return 0
 
     if cmd == "hang":
         time.sleep(30)
+        return 0
+
+    if cmd == "campaign" and len(args) > 1 and args[1] == "plan":
+        path = args[2] if len(args) > 2 else "missing"
+        try:
+            with open(path) as f:
+                definition = json.load(f)
+        except Exception as e:
+            print(json.dumps(envelope("campaign plan", "error", None, error={
+                "type": "ValidationError",
+                "message": f"Cannot read campaign file: {e}",
+            })))
+            return 2
+        sizes = definition.get("problem_sizes", [])
+        seeds = definition.get("problem_seeds", [])
+        solvers = definition.get("solvers", [])
+        repeats = definition.get("repeats", 1)
+        requested = len(sizes) * len(seeds) * len(solvers) * repeats
+        instance_count = len(sizes) * len(seeds)
+        max_binary = max(sizes) if sizes else 0
+        quantum_runs = requested if any(s in ("qaoa", "cudaq-cpu", "cudaq-gpu") for s in solvers) else 0
+        breakdown = []
+        for s in solvers:
+            sup = s in ("exact", "heuristic") or (s in ("qaoa", "cudaq-cpu", "cudaq-gpu") and quantum_supported_family(definition.get("family", "maxcut")))
+            breakdown.append({
+                "solver": s,
+                "supported": sup,
+                "installed": sup,
+                "available": sup,
+                "requested_runs": instance_count * repeats,
+            })
+        warnings = []
+        if requested > DEFAULT_MAX_RUNS:
+            warnings.append(f"Campaign requests {requested} runs; default maximum is {DEFAULT_MAX_RUNS}. Use --override-max-runs to execute.")
+        print(json.dumps(envelope("campaign plan", "success", {
+            "campaign_id": "not-yet-executed",
+            "default_max_runs": DEFAULT_MAX_RUNS,
+            "estimated_quantum_runs": quantum_runs,
+            "exceeds_default_max": requested > DEFAULT_MAX_RUNS,
+            "family": definition.get("family", "maxcut"),
+            "max_binary_variables": max_binary,
+            "name": definition.get("name", "fake-campaign"),
+            "problem_instance_count": instance_count,
+            "repeats": repeats,
+            "requested_runs": requested,
+            "solver_breakdown": breakdown,
+            "unavailable": [],
+            "warnings": warnings,
+        })))
+        return 0
+
+    if cmd == "campaign" and len(args) > 1 and args[1] == "run":
+        path = args[2] if len(args) > 2 else "missing"
+        max_runs = DEFAULT_MAX_RUNS
+        override = False
+        for i, a in enumerate(args):
+            if a == "--max-runs" and i + 1 < len(args):
+                max_runs = int(args[i + 1])
+            if a == "--override-max-runs":
+                override = True
+        try:
+            with open(path) as f:
+                definition = json.load(f)
+        except Exception as e:
+            print(json.dumps(envelope("campaign run", "error", None, error={
+                "type": "ValidationError",
+                "message": f"Cannot read campaign file: {e}",
+            })))
+            return 2
+        sizes = definition.get("problem_sizes", [])
+        seeds = definition.get("problem_seeds", [])
+        solvers = definition.get("solvers", [])
+        repeats = definition.get("repeats", 1)
+        requested = len(sizes) * len(seeds) * len(solvers) * repeats
+        if requested > max_runs and not override:
+            print(json.dumps(envelope("campaign run", "error", None, error={
+                "type": "ValidationError",
+                "message": f"Campaign requests {requested} runs, exceeding maximum {max_runs}. Use --override-max-runs to execute.",
+            })))
+            return 2
+        # Deterministic campaign id based on canonical content.
+        campaign_id = f"campaign-{abs(hash(json.dumps(definition, sort_keys=True))) & 0xffffffffffffffff:016x}"
+        run_ids = [fake_run_id() for _ in range(min(requested, max_runs))]
+        problem_ids = [f"{definition.get('family', 'maxcut')}-fake{campaign_id[-8:]}" for _ in sizes]
+        # Simulate mixed results: first run fails, second skipped, rest success.
+        summary = {"success": 0, "failed": 0, "skipped": 0, "unavailable": 0}
+        for i, _ in enumerate(run_ids):
+            if i == 0:
+                summary["failed"] += 1
+            elif i == 1:
+                summary["skipped"] += 1
+            else:
+                summary["success"] += 1
+        CAMPAIGNS[campaign_id] = definition
+        _save_campaigns()
+        print(json.dumps(envelope("campaign run", "success", {
+            "campaign_id": campaign_id,
+            "completed_runs": len(run_ids),
+            "family": definition.get("family", "maxcut"),
+            "name": definition.get("name", "fake-campaign"),
+            "problem_ids": problem_ids[:len(sizes)],
+            "requested_runs": requested,
+            "run_ids": run_ids,
+            "status_summary": summary,
+        })))
+        return 0
+
+    if cmd == "campaign" and len(args) > 1 and args[1] == "list":
+        _load_campaigns()
+        limit = 20
+        for i, a in enumerate(args):
+            if a == "--limit" and i + 1 < len(args):
+                limit = int(args[i + 1])
+        campaigns = [
+            {"campaign_id": cid, "name": defn.get("name", "fake"), "family": defn.get("family", "maxcut"), "created_at": "2026-01-01T00:00:00+00:00"}
+            for cid, defn in CAMPAIGNS.items()
+        ]
+        print(json.dumps(envelope("campaign list", "success", campaigns[:limit])))
+        return 0
+
+    if cmd == "campaign" and len(args) > 1 and args[1] == "show":
+        _load_campaigns()
+        cid = args[2] if len(args) > 2 else "missing"
+        definition = CAMPAIGNS.get(cid)
+        if definition is None:
+            print(json.dumps(envelope("campaign show", "error", None, error={
+                "type": "ValidationError",
+                "message": f"no such campaign {cid}",
+            })))
+            return 2
+        show = dict(definition)
+        show["campaign_format_version"] = definition.get("campaign_format_version", "1")
+        show["created_at"] = "2026-01-01T00:00:00+00:00"
+        show.setdefault("notes", "")
+        show.setdefault("tags", [])
+        print(json.dumps(envelope("campaign show", "success", show)))
+        return 0
+
+    if cmd == "analyze" and len(args) > 1 and args[1] == "runs":
+        run_ids = []
+        group_by = []
+        scaling_x = None
+        for i, a in enumerate(args):
+            if a == "--run-id" and i + 1 < len(args):
+                run_ids.append(args[i + 1])
+            if a == "--group-by" and i + 1 < len(args):
+                group_by.append(args[i + 1])
+            if a == "--scaling-x" and i + 1 < len(args):
+                scaling_x = args[i + 1]
+        groups = []
+        scaling_points = []
+        for rid in run_ids:
+            groups.append(make_analysis_group(group_by or ["solver"], rid, problem_size=4))
+            if scaling_x:
+                scaling_points.append(make_scaling_point(group_by or ["solver"], rid, scaling_x, 4))
+        print(json.dumps(envelope("analyze runs", "success", {
+            "groups": groups,
+            "comparisons": [],
+            "query": {"run_ids": run_ids, "group_by": group_by or ["solver"], "filters": {}, "scaling_x": scaling_x, "include_failed": False, "include_unavailable": False, "campaign_id": None},
+            "scaling_points": scaling_points,
+            "source_run_ids": run_ids,
+            "warnings": [],
+        })))
+        return 0
+
+    if cmd == "analyze" and len(args) > 1 and args[1] == "campaign":
+        _load_campaigns()
+        cid = args[2] if len(args) > 2 else "missing"
+        definition = CAMPAIGNS.get(cid)
+        if definition is None:
+            print(json.dumps(envelope("analyze campaign", "error", None, error={
+                "type": "ValidationError",
+                "message": f"no such campaign {cid}",
+            })))
+            return 2
+        group_by = []
+        scaling_x = None
+        for i, a in enumerate(args):
+            if a == "--group-by" and i + 1 < len(args):
+                group_by.append(args[i + 1])
+            if a == "--scaling-x" and i + 1 < len(args):
+                scaling_x = args[i + 1]
+        run_ids = [fake_run_id() for _ in range(3)]
+        groups = [make_analysis_group(group_by or ["solver"], rid, problem_size=4) for rid in run_ids]
+        scaling_points = [make_scaling_point(group_by or ["solver"], rid, scaling_x, 4) for rid in run_ids] if scaling_x else []
+        print(json.dumps(envelope("analyze campaign", "success", {
+            "groups": groups,
+            "comparisons": [],
+            "query": {"campaign_id": cid, "group_by": group_by or ["solver"], "filters": {}, "scaling_x": scaling_x, "include_failed": False, "include_unavailable": False},
+            "scaling_points": scaling_points,
+            "source_run_ids": run_ids,
+            "warnings": [{"type": "fake_warning", "message": "simulated analysis warning"}],
+        })))
+        return 0
+
+    if cmd == "report" and len(args) > 1 and args[1] == "campaign":
+        cid = args[2] if len(args) > 2 else "missing"
+        output_dir = "."
+        formats = ["json"]
+        group_by = []
+        scaling_x = None
+        plots = False
+        overwrite = False
+        for i, a in enumerate(args):
+            if a == "--output-dir" and i + 1 < len(args):
+                output_dir = args[i + 1]
+            if a == "--formats" and i + 1 < len(args):
+                formats = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+            if a == "--group-by" and i + 1 < len(args):
+                group_by.append(args[i + 1])
+            if a == "--scaling-x" and i + 1 < len(args):
+                scaling_x = args[i + 1]
+            if a == "--plots":
+                plots = True
+            if a == "--overwrite":
+                overwrite = True
+        os.makedirs(output_dir, exist_ok=True)
+        report_key = cid + json.dumps(formats, sort_keys=True)
+        report_id = f"report-{hashlib.sha256(report_key.encode()).hexdigest()[:16]}"
+        prospective_paths = []
+        if "json" in formats:
+            prospective_paths.append(os.path.join(output_dir, f"{report_id}.json"))
+        if "csv" in formats:
+            prospective_paths.extend([
+                os.path.join(output_dir, f"{report_id}_groups.csv"),
+                os.path.join(output_dir, f"{report_id}_scaling.csv"),
+            ])
+        if "markdown" in formats:
+            prospective_paths.append(os.path.join(output_dir, f"{report_id}.md"))
+        if plots and "plots" in formats:
+            prospective_paths.append(os.path.join(output_dir, f"{report_id}_plot.png"))
+        if not overwrite and any(os.path.exists(p) for p in prospective_paths):
+            print(json.dumps(envelope("report campaign", "error", None, error={
+                "type": "ValidationError",
+                "message": "Report output already exists; pass --overwrite to replace it.",
+            })))
+            return 2
+        paths = {}
+        if "json" in formats:
+            json_path = os.path.join(output_dir, f"{report_id}.json")
+            with open(json_path, "w") as f:
+                json.dump({
+                    "report_format_version": "1",
+                    "report_id": report_id,
+                    "campaign_id": cid,
+                    "generated_at": "2026-01-01T00:00:00+00:00",
+                    "variaq_version": os.environ.get("FAKE_VARIAQ_VERSION", FAKE_VARIAQ_VERSION),
+                    "source_run_ids": [fake_run_id()],
+                    "analysis": {"groups": []},
+                }, f)
+            paths["json"] = json_path
+        if "csv" in formats:
+            groups_path = os.path.join(output_dir, f"{report_id}_groups.csv")
+            scaling_path = os.path.join(output_dir, f"{report_id}_scaling.csv")
+            for p in (groups_path, scaling_path):
+                with open(p, "w") as f:
+                    f.write("group,count\n")
+            paths["csv"] = {"groups": groups_path, "scaling": scaling_path}
+        if "markdown" in formats:
+            md_path = os.path.join(output_dir, f"{report_id}.md")
+            with open(md_path, "w") as f:
+                f.write(f"# Report {report_id}\n")
+            paths["markdown"] = md_path
+        if plots and "plots" in formats:
+            plot_path = os.path.join(output_dir, f"{report_id}_plot.png")
+            with open(plot_path, "wb") as f:
+                f.write(b"PNG")
+            paths["plots"] = {"summary": plot_path}
+        print(json.dumps(envelope("report campaign", "success", {"report_id": report_id, "paths": paths})))
         return 0
 
     if cmd == "capabilities":
@@ -102,7 +435,7 @@ def main(argv):
                 "type": "backend_availability",
                 "message": "CUDA-Q NVIDIA target present but reports no compatible GPU",
             })
-        version = os.environ.get("FAKE_VARIAQ_VERSION", "9.9.9")
+        version = os.environ.get("FAKE_VARIAQ_VERSION", FAKE_VARIAQ_VERSION)
         solvers = [
             {"name": "exact", "supported": True, "installed": True, "available": True,
              "supported_families": list(CLASSICAL_FAMILIES)},
@@ -655,7 +988,7 @@ def main(argv):
             })))
             return 2
         new_id = fake_run_id()
-        version = os.environ.get("FAKE_VARIAQ_VERSION", "0.5.0")
+        version = os.environ.get("FAKE_VARIAQ_VERSION", FAKE_VARIAQ_VERSION)
         print(json.dumps(envelope("runs reproduce", "success", {
             "original_run_id": rid,
             "new_run_id": new_id,

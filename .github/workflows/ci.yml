@@ -26,7 +26,7 @@ jobs:
       - run: npm pack --dry-run
 
   variaq-integration:
-    name: VariaQ 0.5.0 integration
+    name: VariaQ 0.6.0 integration
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -34,8 +34,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: aaronphifer/variaq
-          # Immutable release tag for the verified VariaQ 0.5.x integration.
-          ref: v0.5.0
+          # Immutable release tag for the verified VariaQ 0.6.x integration.
+          ref: v0.6.0
           path: .variaq-source
       - uses: actions/setup-node@v4
         with:
@@ -52,7 +52,7 @@ jobs:
           "$RUNNER_TEMP/variaq-venv/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/variaq-venv/bin/python" -m pip install -e './.variaq-source[quantum]'
       - run: npm ci
-      - name: Run real local integration suite
+      - name: Run real local integration suite with bounded campaign smoke
         env:
           VARIAQ_TEST_PROJECT: ${{ github.workspace }}/.variaq-source
           VARIAQ_TEST_PYTHON: ${{ runner.temp }}/variaq-venv/bin/python

@@ -24,6 +24,7 @@ export interface VariaqSettings {
   projectDir: string;
   dbPath: string;
   problemsDir: string;
+  reportOutputDir: string;
   timeoutMs: number;
 }
 
@@ -102,6 +103,7 @@ export interface ResolvedConfig {
   projectDir: string;
   dbPath: string | null;       // null → let VariaQ use its built-in default
   problemsDir: string | null;  // null → let VariaQ use its built-in default
+  reportOutputDir: string | null; // null → plugin resolves a safe default
   timeoutMs: number;
   source: ResolvedSource;
 }
@@ -213,6 +215,7 @@ export function resolveConfig(raw: VariaqSettings): Omit<ResolvedConfig, never> 
   const projectDir = configuredPath(raw.projectDir, "projectDir");
   const dbPath = configuredPath(raw.dbPath, "dbPath");
   const problemsDir = configuredPath(raw.problemsDir, "problemsDir");
+  const reportOutputDir = configuredPath(raw.reportOutputDir, "reportOutputDir");
 
   let resolvedPython = "";
   let resolvedProjectDir = "";
@@ -283,6 +286,7 @@ export function resolveConfig(raw: VariaqSettings): Omit<ResolvedConfig, never> 
     projectDir: resolvedProjectDir,
     dbPath: dbPath === "" ? null : dbPath,
     problemsDir: problemsDir === "" ? null : problemsDir,
+    reportOutputDir: reportOutputDir === "" ? null : reportOutputDir,
     timeoutMs,
     source,
   };
@@ -536,7 +540,7 @@ export async function runPython(
 }
 
 /**
- * VariaQ 0.5.x capabilities --json data shape. We only model the pieces the
+ * VariaQ 0.6.x capabilities --json data shape. We only model the pieces the
  * plugin reads; everything else is forwarded as unknown. Quantum solver
  * supported families are reported dynamically by VariaQ and must not be
  * hardcoded in the plugin.
@@ -612,14 +616,14 @@ export interface VariaqVersionCompatibility {
 }
 
 /**
- * bb-plugin-variaq 0.4.0 is verified against VariaQ 0.5.0 / schema_version 1.
- * Patch releases in the 0.5 series are accepted. Other series are reported as
+ * bb-plugin-variaq 0.5.0 is verified against VariaQ 0.6.0 / schema_version 1.
+ * Patch releases in the 0.6 series are accepted. Other series are reported as
  * unsupported so users can still inspect a mismatched environment.
  */
 export function checkVariaqVersion(raw: string | null, schemaVersion?: string): VariaqVersionCompatibility {
   const match = raw?.match(/(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\b|$)/);
   const version = match ? `${match[1]}.${match[2]}.${match[3]}` : null;
-  const supported = match?.[1] === "0" && match?.[2] === "5";
+  const supported = match?.[1] === "0" && match?.[2] === "6";
   const schemaVersionSupported = schemaVersion === undefined || schemaVersion === SUPPORTED_SCHEMA_VERSION;
 
   const parts: string[] = [];
@@ -955,6 +959,88 @@ export function exitCodeFromEnvelope(envelope: ParsedEnvelope, processCode: numb
   if (processCode !== 0) return processCode;
   if (envelope.status === "error") return 1;
   return 0;
+}
+
+export interface CampaignPlanEnvelopeData {
+  campaign_id: string;
+  default_max_runs: number;
+  estimated_quantum_runs: number;
+  exceeds_default_max: boolean;
+  family: string;
+  max_binary_variables: number;
+  name: string;
+  problem_instance_count: number;
+  repeats: number;
+  requested_runs: number;
+  solver_breakdown: Array<{
+    available: boolean;
+    installed: boolean;
+    requested_runs: number;
+    solver: string;
+    supported: boolean;
+  }>;
+  unavailable: Array<{ solver: string; reason: string }>;
+  warnings: string[];
+}
+
+export interface CampaignRunEnvelopeData {
+  campaign_id: string;
+  completed_runs: number;
+  family: string;
+  name: string;
+  problem_ids: string[];
+  requested_runs: number;
+  run_ids: string[];
+  status_summary: {
+    success: number;
+    failed: number;
+    skipped: number;
+    unavailable: number;
+  };
+}
+
+export interface CampaignListEnvelopeData {
+  campaigns: Array<{
+    campaign_id: string;
+    created_at: string;
+    family: string;
+    name: string;
+  }>;
+}
+
+export interface CampaignShowEnvelopeData {
+  base_seed: number;
+  campaign_format_version: string;
+  created_at: string;
+  family: string;
+  generator_parameters: Record<string, unknown>;
+  name: string;
+  notes: string;
+  problem_seeds: number[];
+  problem_sizes: number[];
+  repeats: number;
+  solver_config: Record<string, Record<string, unknown>>;
+  solvers: string[];
+  tags: string[];
+}
+
+export interface AnalyzeEnvelopeData {
+  groups: unknown[];
+  comparisons: unknown[];
+  query: Record<string, unknown>;
+  scaling_points: unknown[];
+  source_run_ids: string[];
+  warnings: unknown[];
+}
+
+export interface ReportCampaignEnvelopeData {
+  report_id: string;
+  paths: {
+    json?: string;
+    csv?: { groups?: string; scaling?: string };
+    markdown?: string;
+    plots?: Record<string, string>;
+  };
 }
 
 /** Re-export schema constants for convenience. */
