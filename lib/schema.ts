@@ -188,9 +188,9 @@ export interface ParsedEnvelope {
 export const SUPPORTED_SCHEMA_VERSION = "1";
 
 /** Compatibility metadata, mirrored here for the schema module. */
-export const BB_PLUGIN_VARIAQ_VERSION = "0.5.1";
-export const VERIFIED_VARIAQ_VERSION = "0.8.0rc1";
-export const SUPPORTED_VARIAQ_SERIES = "0.6.x and 0.8.0rc1";
+export const BB_PLUGIN_VARIAQ_VERSION = "0.6.0";
+export const VERIFIED_VARIAQ_VERSION = "0.8.0";
+export const SUPPORTED_VARIAQ_SERIES = "0.6.x, 0.8.x and 0.8.0rc1";
 
 /**
  * Validate a VariaQ JSON envelope.

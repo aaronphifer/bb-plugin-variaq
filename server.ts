@@ -538,9 +538,10 @@ export default async function plugin(bb: BbPluginApi) {
   async function requireComparisonSupport(c: ResolvedConfig, comparison?: ComparisonType): Promise<void> {
     if (comparison !== "paired_solvers") return;
     const result = await runVariaqStrict(c, ["--version"], { timeoutMs: 15_000 });
-    if (checkVariaqVersion(result.stdout).version !== "0.8.0rc1") {
+    const compat = checkVariaqVersion(result.stdout);
+    if (!(compat.supported && compat.version !== null && (compat.version === "0.8.0rc1" || /^0\.8\.\d+$/.test(compat.version)))) {
       throw new PluginError(
-        "paired_solvers requires the verified VariaQ 0.8.0rc1 candidate.",
+        "paired_solvers requires a verified VariaQ 0.8 stable release or the tested 0.8.0rc1 candidate.",
         "Legacy comparisons remain available on VariaQ 0.6.x; no fallback or solver execution occurred.",
       );
     }
@@ -552,7 +553,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (validated.compare !== undefined) {
       throw new PluginError(
         "VariaQ analyze runs does not accept comparison selectors.",
-        "Use variaq_analyze_campaign or bb variaq analyze-campaign for comparisons, including paired_solvers on 0.8.0rc1.",
+        "Use variaq_analyze_campaign or bb variaq analyze-campaign for comparisons, including paired_solvers on VariaQ 0.8.x.",
       );
     }
     const argv = buildAnalyzeArgv("runs", validated);
@@ -1210,7 +1211,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "variaq_analyze_campaign",
     description: "Analyze all runs belonging to a VariaQ campaign. Read-only; does not execute solvers or modify runs.",
-    instructions: "Use variaq_analyze_campaign to compute VariaQ-derived quality, feasibility, timing, resource, and scaling summaries for a stored campaign. Analysis is read-only. compare=paired_solvers requires VariaQ 0.8.0rc1 and preserves its pairing, null reasons and timing scopes.",
+    instructions: "Use variaq_analyze_campaign to compute VariaQ-derived quality, feasibility, timing, resource, and scaling summaries for a stored campaign. Analysis is read-only. compare=paired_solvers requires a verified VariaQ 0.8.x stable release or the tested 0.8.0rc1 candidate and preserves its pairing, null reasons and timing scopes.",
     parameters: z.object({
       campaignId: z.string().min(1).describe("Campaign id"),
     }).merge(analyzeQuerySchema.omit({ campaign_id: true, run_ids: true })),
@@ -1227,7 +1228,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "variaq_report_campaign",
     description: "Generate JSON/CSV/Markdown (and optional plots) report files for a VariaQ campaign. This tool writes files under the configured report output directory.",
-    instructions: "Use variaq_report_campaign to produce persistent report artifacts from a stored campaign. Reports derive from stored runs, preserve source_run_ids, and are written under the configured reportOutputDir. The outputDir argument is resolved relative to that root and cannot escape it. compare=paired_solvers requires VariaQ 0.8.0rc1 and includes per-run, pair and repeat CSV artifacts.",
+    instructions: "Use variaq_report_campaign to produce persistent report artifacts from a stored campaign. Reports derive from stored runs, preserve source_run_ids, and are written under the configured reportOutputDir. The outputDir argument is resolved relative to that root and cannot escape it. compare=paired_solvers requires a verified VariaQ 0.8.x stable release or the tested 0.8.0rc1 candidate and includes per-run, pair and repeat CSV artifacts.",
     parameters: z.object({
       campaignId: z.string().min(1).describe("Campaign id"),
       outputDir: z.string().min(1).describe("Relative output directory beneath the configured report output root"),

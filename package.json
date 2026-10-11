@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-variaq",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "type": "module",
   "description": "Thin bb adapter for the standalone VariaQ hybrid-compute research platform.",
   "license": "Apache-2.0",
@@ -34,7 +34,8 @@
   "overrides": {
     "bb-app": {
       "npm": "11.19.1"
-    }
+    },
+    "source-map-js": "1.2.2"
   },
   "dependencies": {
     "zod": "^4.3.6"

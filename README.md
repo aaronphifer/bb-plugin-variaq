@@ -180,27 +180,29 @@ prose parsing or run-ID scraping.
 ## Version compatibility
 
 The current checkout targets BB 0.46.x / Plugin SDK 0.6.37 and schema version `1`.
-It accepts stable VariaQ 0.6.x releases and the explicitly tested `0.8.0rc1`
-candidate. Real local integration was verified against the immutable `v0.6.0`
-tag and the reviewed v0.8 candidate checkout. Patch acceptance within 0.6.x is a
-version policy; every patch was not independently executed. VariaQ 0.5.x, 0.7.x,
-0.8.0 final, other release candidates and future schemas remain unsupported.
-A suffix is never silently stripped from a version. Status/version report
-unsupported environments with a warning; schema parsing still rejects non-v1
-output. This does not authorize running an unverified version.
+It accepts stable VariaQ 0.6.x and 0.8.x series releases plus the explicitly
+tested `0.8.0rc1` candidate. Real local integration was verified against the
+immutable `v0.6.0` tag and the reviewed v0.8 candidate checkout. Patch
+acceptance within 0.6.x and 0.8.x is a version policy; every patch was not
+independently executed. VariaQ 0.5.x, 0.7.x, 0.9.x, other release candidates
+(including rc2 and later) and future schemas remain unsupported. A suffix is
+never silently stripped from a version. Status/version report unsupported
+environments with a warning; schema parsing still rejects non-v1 output. This
+does not authorize running an unverified version.
 
 The BB engine/SDK pins have moved from BB 0.43 / SDK 0.4.104 to the actual BB
-0.46 host. Old BB 0.43 host compatibility is not claimed. Package identity stays
-`0.5.1` (unreleased); this work does not publish a plugin or a VariaQ release.
+0.46 host. Old BB 0.43 host compatibility is not claimed. Package identity is
+`0.6.0` (unreleased); this work does not publish a plugin or a VariaQ release.
 
-### Paired-solver analysis in the candidate
+### Paired-solver analysis in the 0.8 series
 
-On `0.8.0rc1`, existing `variaq_analyze_campaign` and `variaq_report_campaign`
-tools accept `compare: "paired_solvers"`; CLI equivalents accept
-`--compare paired_solvers`. This forwards VariaQ's analysis, including instances,
-pairs, precision, repeat/seed controls, null/reason values and timing scopes.
-Reports forward all generated paths, including per-run, pair and repeat CSVs.
-The plugin computes no objectives, gaps, pairing, timings or speedups.
+On verified VariaQ 0.8.x stable releases and the tested `0.8.0rc1` candidate,
+existing `variaq_analyze_campaign` and `variaq_report_campaign` tools accept
+`compare: "paired_solvers"`; CLI equivalents accept `--compare paired_solvers`.
+This forwards VariaQ's analysis, including instances, pairs, precision,
+repeat/seed controls, null/reason values and timing scopes. Reports forward all
+generated paths, including per-run, pair and repeat CSVs. The plugin computes
+no objectives, gaps, pairing, timings or speedups.
 
 ```sh
 bb variaq analyze-campaign CAMPAIGN_ID --compare paired_solvers --json

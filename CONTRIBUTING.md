@@ -32,6 +32,10 @@ VARIAQ_TEST_VERSION=0.8.0rc1 \
 npm run test:integration
 ```
 
+To validate the stable VariaQ 0.8.0 release instead, point
+`VARIAQ_TEST_VERSION=0.8.0` at the pinned stable-tag checkout (the exact commit
+SHA is pinned at release time, mirroring the CI matrix placeholder).
+
 These tests cover the CLI contract and local exact, heuristic, and Qiskit
 flows. They must not reimplement VariaQ solver-correctness tests.
 

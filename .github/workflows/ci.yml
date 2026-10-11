@@ -37,6 +37,9 @@ jobs:
           - variaq_version: "0.8.0rc1"
             # Reviewed release/0.8.0rc1 candidate; never use a moving branch.
             variaq_ref: 551151a2c2ccfe0301dca1b22fcc8abf5d540f56
+          - variaq_version: "0.8.0"
+            # VariaQ 0.8.0 stable release commit on release/0.8.0-stable-prep; never use a moving branch.
+            variaq_ref: 6bc3d40ade70f6dbcc7a2417ed12df4207a3edf6
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

@@ -418,7 +418,7 @@ describeReal("campaign, analysis, and report integration", () => {
   });
 });
 
-describe.skipIf(!HAS_REAL_VARIAQ || VARIAQ_VERSION !== "0.8.0rc1")("paired-solver candidate integration", () => {
+describe.skipIf(!HAS_REAL_VARIAQ || !["0.8.0", "0.8.0rc1"].includes(VARIAQ_VERSION))("paired-solver candidate integration", () => {
   it("forwards controls, paired/null/timing evidence and expanded reports through existing tools and CLI", async () => {
     const h = await setupHost();
     const parameters = { p: 1, optimizer_trials: 2, shots: 32, warmup: false, candidate_parameters: [[0.5, 0.25], [0.8, 0.4]] };

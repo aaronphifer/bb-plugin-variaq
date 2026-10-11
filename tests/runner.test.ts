@@ -349,11 +349,23 @@ describe("VariaQ output contracts", () => {
     expect(compatibility.schemaVersionSupported).toBe(true);
   });
 
-  it.each(["0.8.0rc2", "0.8.0", "0.7.0", "0.6.0rc1", "0.8.0rc1junk", "0.6.0.invalid", "noise 0.6.0"])(
+  it.each(["0.8.0rc2", "0.7.0", "0.6.0rc1", "0.8.0rc1junk", "0.6.0.invalid", "noise 0.6.0"])(
     "does not silently accept an unverified or malformed version: %s", (version) => {
       expect(checkVariaqVersion(version, "1").supported).toBe(false);
     },
   );
+
+  it("accepts stable 0.8 series releases without a warning", () => {
+    const compatibility = checkVariaqVersion("0.8.0", "1");
+    expect(compatibility.supported).toBe(true);
+    expect(compatibility.warning).toBeNull();
+    expect(checkVariaqVersion("variaq 0.8.3").supported).toBe(true);
+    expect(checkVariaqVersion("0.8.0", "1").schemaVersionSupported).toBe(true);
+  });
+
+  it("rejects unverified 0.8 release candidates such as rc2", () => {
+    expect(checkVariaqVersion("0.8.1rc1").supported).toBe(false);
+  });
 
   it("accepts canonical nested campaign solver parameters without losing controls", () => {
     const solver_config = { qaoa: { seed: 42, parameters: { p: 1, candidate_parameters: [[0.5, 0.25]], warmup: false } } };
