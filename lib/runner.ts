@@ -616,14 +616,14 @@ export interface VariaqVersionCompatibility {
 }
 
 /**
- * bb-plugin-variaq 0.5.0 is verified against VariaQ 0.6.0 / schema_version 1.
- * Patch releases in the 0.6 series are accepted. Other series are reported as
+ * Accept stable VariaQ 0.6.x releases and the explicitly tested 0.8.0rc1 candidate.
+ * Other versions and candidates are reported as
  * unsupported so users can still inspect a mismatched environment.
  */
 export function checkVariaqVersion(raw: string | null, schemaVersion?: string): VariaqVersionCompatibility {
-  const match = raw?.match(/(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\b|$)/);
-  const version = match ? `${match[1]}.${match[2]}.${match[3]}` : null;
-  const supported = match?.[1] === "0" && match?.[2] === "6";
+  const match = raw?.trim().match(/^(?:variaq\s+)?(\d+)\.(\d+)\.(\d+)(rc\d+)?$/);
+  const version = match ? `${match[1]}.${match[2]}.${match[3]}${match[4] ?? ""}` : null;
+  const supported = (match?.[1] === "0" && match?.[2] === "6" && !match?.[4]) || version === "0.8.0rc1";
   const schemaVersionSupported = schemaVersion === undefined || schemaVersion === SUPPORTED_SCHEMA_VERSION;
 
   const parts: string[] = [];

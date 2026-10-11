@@ -80,7 +80,14 @@ export function isProblemFamily(value: string): value is ProblemFamily {
 
 export const campaignSolverOverrideSchema = z.record(
   z.string(),
-  z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))])),
+  z.object({
+    seed: z.number().int().min(0).optional(),
+    parameters: z.record(z.string(), z.union([
+      z.string(), z.number(), z.boolean(), z.null(),
+      z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])),
+      z.array(z.array(z.number())),
+    ])).optional(),
+  }).catchall(z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))])),
 );
 
 export const campaignDefinitionSchema = z.object({
@@ -148,6 +155,11 @@ export const campaignListItemSchema = z.object({
   created_at: z.string(),
 });
 
+export const comparisonTypeSchema = z.enum([
+  "classical_vs_quantum", "qiskit_vs_cudaq", "gpu_vs_cpu", "paired_solvers",
+]);
+export type ComparisonType = z.infer<typeof comparisonTypeSchema>;
+
 export const analyzeQuerySchema = z.object({
   run_ids: z.array(z.string()).optional(),
   campaign_id: z.string().optional(),
@@ -156,7 +168,7 @@ export const analyzeQuerySchema = z.object({
   scaling_x: z.string().optional(),
   include_failed: z.boolean().optional(),
   include_unavailable: z.boolean().optional(),
-  compare: z.enum(["classical_vs_quantum", "qiskit_vs_cudaq", "gpu_vs_cpu"]).optional(),
+  compare: comparisonTypeSchema.optional(),
 });
 
 export type AnalyzeQuery = z.infer<typeof analyzeQuerySchema>;
@@ -177,8 +189,8 @@ export const SUPPORTED_SCHEMA_VERSION = "1";
 
 /** Compatibility metadata, mirrored here for the schema module. */
 export const BB_PLUGIN_VARIAQ_VERSION = "0.5.1";
-export const VERIFIED_VARIAQ_VERSION = "0.6.0";
-export const SUPPORTED_VARIAQ_SERIES = "0.6.x";
+export const VERIFIED_VARIAQ_VERSION = "0.8.0rc1";
+export const SUPPORTED_VARIAQ_SERIES = "0.6.x and 0.8.0rc1";
 
 /**
  * Validate a VariaQ JSON envelope.

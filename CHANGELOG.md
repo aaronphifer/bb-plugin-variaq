@@ -4,7 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## 0.5.1 - Unreleased
 
-Maintenance-only release.
+Unreleased compatibility update.
+
+- Accept the tested VariaQ 0.8.0rc1 candidate while retaining stable 0.6.x support and schema-v1 validation; preserve candidate suffixes and reject unverified versions.
+- Target BB 0.46 / Plugin SDK 0.6.37, update build dependencies, and verify real local integration with both VariaQ 0.6.0 and 0.8.0rc1.
+- Forward paired_solvers through existing campaign analysis/report tools and CLI, including expanded CSV paths, without plugin-side science. Reject unsupported run-comparison requests clearly.
+- Validate canonical nested campaign solver parameters, including numeric candidate matrices, using non-recursive tool schemas.
+- Keep GPU integration explicitly opt-in with VARIAQ_TEST_GPU=1, independently of CUDA-Q CPU tests.
+- Run hosted legacy and candidate integration against immutable VariaQ commit pins.
+- Document the six development-toolchain audit findings separately from runtime dependencies.
 
 - Fix duplicated plot-format requests in `variaq_report_campaign` when both `formats: ["plots"]` and `plots: true` are supplied; `formats` is now canonical and `plots: true` only ensures "plots" appears once.
 - Update GitHub Actions to Node 24-native action versions (`actions/checkout@v6`, `actions/setup-node@v7`, `actions/setup-python@v7`) to resolve Node 20 deprecation warnings while preserving existing workflow behavior.

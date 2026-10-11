@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import crypto from "node:crypto";
-import { problemFamilySchema, type ProblemFamily, campaignDefinitionSchema, campaignPlanDataSchema, campaignRunDataSchema, campaignListItemSchema, analyzeQuerySchema, reportFormatsSchema, type CampaignDefinition } from "./lib/schema.js";
+import { comparisonTypeSchema, type ComparisonType, problemFamilySchema, type ProblemFamily, campaignDefinitionSchema, campaignPlanDataSchema, campaignRunDataSchema, campaignListItemSchema, analyzeQuerySchema, reportFormatsSchema, type CampaignDefinition } from "./lib/schema.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { PluginError, checkVariaqVersion, generateProblemArgv, parseJsonOutput, parseKeyValue, parseSolvers, probeCapabilities, quantumSupportNote, requireSuccess, resolveConfig, runVariaqJson, runVariaqStrict, solverSupportsFamily, statusFromCapabilities } from "./lib/runner.js";
 import type { ResolvedConfig, VariaqSettings, CompareQuantumEnvelopeData, BenchmarkEnvelopeData, ReproduceEnvelopeData, ProblemGenerateData, SolveEnvelopeData, FamilyGenerateInput, VariaqSolver, CampaignPlanEnvelopeData, CampaignRunEnvelopeData, CampaignListEnvelopeData, CampaignShowEnvelopeData, AnalyzeEnvelopeData, ReportCampaignEnvelopeData } from "./lib/runner.js";
@@ -535,9 +535,26 @@ export default async function plugin(bb: BbPluginApi) {
     return argv;
   }
 
+  async function requireComparisonSupport(c: ResolvedConfig, comparison?: ComparisonType): Promise<void> {
+    if (comparison !== "paired_solvers") return;
+    const result = await runVariaqStrict(c, ["--version"], { timeoutMs: 15_000 });
+    if (checkVariaqVersion(result.stdout).version !== "0.8.0rc1") {
+      throw new PluginError(
+        "paired_solvers requires the verified VariaQ 0.8.0rc1 candidate.",
+        "Legacy comparisons remain available on VariaQ 0.6.x; no fallback or solver execution occurred.",
+      );
+    }
+  }
+
   async function opAnalyzeRuns(query: import("./lib/schema.js").AnalyzeQuery) {
     const c = await cfg();
     const validated = analyzeQuerySchema.parse(query);
+    if (validated.compare !== undefined) {
+      throw new PluginError(
+        "VariaQ analyze runs does not accept comparison selectors.",
+        "Use variaq_analyze_campaign or bb variaq analyze-campaign for comparisons, including paired_solvers on 0.8.0rc1.",
+      );
+    }
     const argv = buildAnalyzeArgv("runs", validated);
     const result = await runVariaqJson(c, argv, { timeoutMs: 60_000 });
     const envelope = requireSuccess(result, ["analyze", "runs"]);
@@ -548,6 +565,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function opAnalyzeCampaign(campaignId: string, query: Omit<import("./lib/schema.js").AnalyzeQuery, "campaign_id">) {
     const c = await cfg();
     const fullQuery = analyzeQuerySchema.parse({ ...query, campaign_id: campaignId });
+    await requireComparisonSupport(c, fullQuery.compare);
     const argv = buildAnalyzeArgv("campaign", fullQuery);
     const result = await runVariaqJson(c, argv, { timeoutMs: 60_000 });
     const envelope = requireSuccess(result, ["analyze", "campaign"]);
@@ -580,12 +598,14 @@ export default async function plugin(bb: BbPluginApi) {
       formats: ["json" | "csv" | "markdown" | "plots", ...("json" | "csv" | "markdown" | "plots")[]];
       groupBy?: string[];
       scalingX?: string;
-      compare?: "classical_vs_quantum" | "qiskit_vs_cudaq" | "gpu_vs_cpu";
+      compare?: ComparisonType;
       plots?: boolean;
       overwrite?: boolean;
     },
   ) {
     const c = await cfg();
+    if (options.compare !== undefined) comparisonTypeSchema.parse(options.compare);
+    await requireComparisonSupport(c, options.compare);
     const root = resolveReportOutputDir(c);
     const containedDir = await resolveContainedReportDir(root, options.outputDir);
 
@@ -851,7 +871,7 @@ export default async function plugin(bb: BbPluginApi) {
               formats: formats as ["json" | "csv" | "markdown" | "plots", ...("json" | "csv" | "markdown" | "plots")[]],
               groupBy: groupBy.length > 0 ? groupBy : undefined,
               scalingX: opts.get("scaling-x"),
-              compare: opts.get("compare") as "classical_vs_quantum" | "qiskit_vs_cudaq" | "gpu_vs_cpu" | undefined,
+              compare: opts.get("compare") as ComparisonType | undefined,
               plots: args.includes("--plots"),
               overwrite: args.includes("--overwrite"),
             });
@@ -1175,7 +1195,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "variaq_analyze_runs",
     description: "Analyze a bounded set of stored VariaQ experiment runs. Read-only; does not execute solvers or modify runs.",
-    instructions: "Use variaq_analyze_runs to compute VariaQ-derived quality, feasibility, timing, resource, and scaling summaries over run IDs. Analysis is read-only and returns VariaQ's AnalysisResult directly.",
+    instructions: "Use variaq_analyze_runs to compute VariaQ-derived quality, feasibility, timing, resource, and scaling summaries over run IDs. Analysis is read-only and returns VariaQ's AnalysisResult directly. Comparison selectors require variaq_analyze_campaign; VariaQ analyze runs has no --compare contract.",
     parameters: analyzeQuerySchema.omit({ campaign_id: true }),
     async execute(query) {
       try {
@@ -1190,7 +1210,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "variaq_analyze_campaign",
     description: "Analyze all runs belonging to a VariaQ campaign. Read-only; does not execute solvers or modify runs.",
-    instructions: "Use variaq_analyze_campaign to compute VariaQ-derived quality, feasibility, timing, resource, and scaling summaries for a stored campaign. Analysis is read-only.",
+    instructions: "Use variaq_analyze_campaign to compute VariaQ-derived quality, feasibility, timing, resource, and scaling summaries for a stored campaign. Analysis is read-only. compare=paired_solvers requires VariaQ 0.8.0rc1 and preserves its pairing, null reasons and timing scopes.",
     parameters: z.object({
       campaignId: z.string().min(1).describe("Campaign id"),
     }).merge(analyzeQuerySchema.omit({ campaign_id: true, run_ids: true })),
@@ -1207,14 +1227,14 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "variaq_report_campaign",
     description: "Generate JSON/CSV/Markdown (and optional plots) report files for a VariaQ campaign. This tool writes files under the configured report output directory.",
-    instructions: "Use variaq_report_campaign to produce persistent report artifacts from a stored campaign. Reports derive from stored runs, preserve source_run_ids, and are written under the configured reportOutputDir. The outputDir argument is resolved relative to that root and cannot escape it.",
+    instructions: "Use variaq_report_campaign to produce persistent report artifacts from a stored campaign. Reports derive from stored runs, preserve source_run_ids, and are written under the configured reportOutputDir. The outputDir argument is resolved relative to that root and cannot escape it. compare=paired_solvers requires VariaQ 0.8.0rc1 and includes per-run, pair and repeat CSV artifacts.",
     parameters: z.object({
       campaignId: z.string().min(1).describe("Campaign id"),
       outputDir: z.string().min(1).describe("Relative output directory beneath the configured report output root"),
       formats: reportFormatsSchema.describe("Report formats, e.g. ['json', 'csv', 'markdown']"),
       groupBy: z.array(z.string()).max(8).optional().describe("Group-by keys"),
       scalingX: z.string().optional().describe("Scaling x-axis metric, e.g. problem_size"),
-      compare: z.enum(["classical_vs_quantum", "qiskit_vs_cudaq", "gpu_vs_cpu"]).optional(),
+      compare: comparisonTypeSchema.optional(),
       plots: z.boolean().optional().describe("Request matplotlib plots if available"),
       overwrite: z.boolean().optional(),
     }),

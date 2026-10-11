@@ -82,6 +82,33 @@ describe("status via fake CLI", () => {
     expect(status.variaq.compatibility.warning).toBeNull();
   });
 
+  it("detects the supported 0.8.0rc1 candidate through capabilities", async () => {
+    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.8.0rc1");
+    const h = await setup();
+    const status = JSON.parse(String(await tool(h, "variaq_status", {})));
+    expect(status.variaq.version).toBe("0.8.0rc1");
+    expect(status.variaq.schema_version).toBe("1");
+    expect(status.variaq.compatibility.supported).toBe(true);
+    expect(status.variaq.compatibility.warning).toBeNull();
+  });
+
+  it("rejects paired analysis/reporting on 0.6.x with a clear compatibility error", async () => {
+    const h = await setup();
+    for (const [name, input] of [
+      ["variaq_analyze_campaign", { campaignId: "campaign-old", compare: "paired_solvers" }],
+      ["variaq_report_campaign", { campaignId: "campaign-old", outputDir: "legacy", formats: ["json"], compare: "paired_solvers" }],
+    ] as const) {
+      const result = JSON.parse(String(await tool(h, name, input)));
+      expect(result.error).toContain("paired_solvers requires");
+      expect(result.hint).toContain("Legacy comparisons remain available");
+    }
+    const result = await cli(h, ["analyze-runs", "--run-id", "run-old", "--compare", "paired_solvers", "--json"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("analyze runs does not accept comparison selectors");
+    const runs = JSON.parse(String(await tool(h, "variaq_analyze_runs", { run_ids: ["run-old"], compare: "classical_vs_quantum" })));
+    expect(runs.error).toContain("analyze runs does not accept comparison selectors");
+  });
+
   it("reports 0.5 series as unsupported", async () => {
     vi.stubEnv("FAKE_VARIAQ_VERSION", "0.5.2");
     const h = await setup();

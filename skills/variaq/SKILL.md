@@ -90,5 +90,8 @@ for machine-readable output.
   nonzero infeasible counts as a run failure.
 - **Graph Partition quantum support remains unadvertised** unless VariaQ
   capabilities change in a future release.
-- bb-plugin-variaq 0.5.x is verified against VariaQ 0.6.x and schema version `1`.
-  Other VariaQ series or schema versions are reported as unsupported.
+- This checkout supports stable VariaQ 0.6.x and the explicitly verified 0.8.0rc1 candidate, schema version `1`, on BB 0.46 / SDK 0.6.37. Other versions/candidates/schemas remain unsupported.
+- On 0.8.0rc1, pass compare: "paired_solvers" to variaq_analyze_campaign or variaq_report_campaign. Forward VariaQ's pairing, precision, null reasons and timing scopes; do not compute scientific metrics or claim cold GPU state/speedup.
+- VariaQ analyze runs has no --compare contract; use stored campaign analysis for comparisons. Paired analysis/reporting on 0.6.x fails clearly.
+- Campaign solver_config uses nested seed/parameters overrides, including numeric candidate-parameter matrices. Preview resource limits before execution.
+- A plugin subprocess timeout terminates the local command; it does not resume work or guarantee an in-flight native result was saved. Do not automatically retry. CLI campaign reruns explicitly append new work; web task deduplication is a separate VariaQ web behavior.

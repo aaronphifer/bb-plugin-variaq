@@ -22,12 +22,13 @@ solver installation.
 
 ## Real VariaQ integration
 
-Install VariaQ 0.2.0 separately with Python 3.12 and its `quantum` extra, then
+Install VariaQ 0.6.0 or the local 0.8.0rc1 candidate separately with Python 3.12 and its `quantum` extra, then
 run:
 
 ```bash
 VARIAQ_TEST_PROJECT=/path/to/variaq \
 VARIAQ_TEST_PYTHON=/path/to/variaq/.venv/bin/python \
+VARIAQ_TEST_VERSION=0.8.0rc1 \
 npm run test:integration
 ```
 
@@ -39,9 +40,13 @@ CUDA-Q is optional. On a compatible local or self-hosted machine:
 ```bash
 VARIAQ_TEST_PROJECT=/path/to/variaq \
 VARIAQ_TEST_PYTHON=/path/to/variaq/.venv/bin/python \
+VARIAQ_TEST_VERSION=0.8.0rc1 \
 VARIAQ_TEST_CUDAQ=1 \
 npm run test:integration
 ```
+
+GPU integration additionally requires `VARIAQ_TEST_GPU=1`. Set the expected
+version to `0.6.0` when validating the legacy tagged checkout.
 
 Use `npm run smoke` for a deterministic installed-plugin workflow. GPU work is
 opt-in with `VARIAQ_SMOKE_GPU=1`; neither physical-QPU nor remote-provider tests
@@ -56,3 +61,8 @@ belong in the plugin's required CI.
   BB, or Plugin SDK versions.
 - Do not commit local settings, experiment databases, generated problems,
   credentials, dependency directories, coverage, logs, or build output.
+
+CI runs the legacy and candidate integration suite against the immutable VariaQ
+commit pins in `.github/workflows/ci.yml`. Keep `VARIAQ_TEST_VERSION` matched to
+each source revision. A candidate pin must come from reviewed release-branch
+code; do not substitute main, v0.7, a moving candidate branch, or an unverified build.
