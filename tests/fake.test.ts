@@ -82,6 +82,65 @@ describe("status via fake CLI", () => {
     expect(status.variaq.compatibility.warning).toBeNull();
   });
 
+  it("detects the supported 0.8.0rc1 candidate through capabilities", async () => {
+    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.8.0rc1");
+    const h = await setup();
+    const status = JSON.parse(String(await tool(h, "variaq_status", {})));
+    expect(status.variaq.version).toBe("0.8.0rc1");
+    expect(status.variaq.schema_version).toBe("1");
+    expect(status.variaq.compatibility.supported).toBe(true);
+    expect(status.variaq.compatibility.warning).toBeNull();
+  });
+
+  it("detects stable 0.8.0 through capabilities without a warning", async () => {
+    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.8.0");
+    const h = await setup();
+    const status = JSON.parse(String(await tool(h, "variaq_status", {})));
+    expect(status.variaq.version).toBe("0.8.0");
+    expect(status.variaq.compatibility.supported).toBe(true);
+    expect(status.variaq.compatibility.warning).toBeNull();
+  });
+
+  it("runs paired analysis and reporting on a stable 0.8.0 stub", async () => {
+    vi.stubEnv("FAKE_VARIAQ_VERSION", "0.8.0");
+    const h = await setup();
+    const definition = {
+      campaign_format_version: "1", name: "stable-paired", family: "maxcut",
+      problem_sizes: [4], problem_seeds: [1], solvers: ["exact", "heuristic"],
+      repeats: 1, base_seed: 42, solver_config: {},
+    };
+    const run = JSON.parse(String(await tool(h, "variaq_campaign_run", {
+      ...definition, maxRuns: 10, overrideMaxRuns: false,
+    })));
+    expect(run.exitCode).toBe(0);
+    const analysis = JSON.parse(String(await tool(h, "variaq_analyze_campaign", {
+      campaignId: run.campaignId, compare: "paired_solvers",
+    })));
+    expect(analysis.analysis.warnings).toEqual([{ type: "fake_warning", message: "simulated analysis warning" }]);
+    expect(analysis.warnings).toEqual([]);
+    const report = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId, outputDir: "stable", formats: ["json"], compare: "paired_solvers",
+    })));
+    expect(report.reportId).toMatch(/^report-/);
+  });
+
+  it("rejects paired analysis/reporting on 0.6.x with a clear compatibility error", async () => {
+    const h = await setup();
+    for (const [name, input] of [
+      ["variaq_analyze_campaign", { campaignId: "campaign-old", compare: "paired_solvers" }],
+      ["variaq_report_campaign", { campaignId: "campaign-old", outputDir: "legacy", formats: ["json"], compare: "paired_solvers" }],
+    ] as const) {
+      const result = JSON.parse(String(await tool(h, name, input)));
+      expect(result.error).toContain("paired_solvers requires");
+      expect(result.hint).toContain("Legacy comparisons remain available");
+    }
+    const result = await cli(h, ["analyze-runs", "--run-id", "run-old", "--compare", "paired_solvers", "--json"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("analyze runs does not accept comparison selectors");
+    const runs = JSON.parse(String(await tool(h, "variaq_analyze_runs", { run_ids: ["run-old"], compare: "classical_vs_quantum" })));
+    expect(runs.error).toContain("analyze runs does not accept comparison selectors");
+  });
+
   it("reports 0.5 series as unsupported", async () => {
     vi.stubEnv("FAKE_VARIAQ_VERSION", "0.5.2");
     const h = await setup();

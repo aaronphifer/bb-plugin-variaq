@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-variaq",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "type": "module",
   "description": "Thin bb adapter for the standalone VariaQ hybrid-compute research platform.",
   "license": "Apache-2.0",
@@ -17,8 +17,8 @@
     "LICENSE"
   ],
   "engines": {
-    "bb": ">=0.43.0 <0.44.0",
-    "bbPluginSdk": "0.4.104"
+    "bb": ">=0.46.0 <0.47.0",
+    "bbPluginSdk": "0.6.37"
   },
   "bb": {
     "name": "VariaQ",
@@ -34,16 +34,17 @@
   "overrides": {
     "bb-app": {
       "npm": "11.19.1"
-    }
+    },
+    "source-map-js": "1.2.2"
   },
   "dependencies": {
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.4.104",
+    "@get-bb/plugin-sdk": "0.6.37",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
-    "bb-app": "0.43.3",
+    "bb-app": "0.46.0",
     "better-sqlite3": "^12.11.1",
     "cron-parser": "^5.10.1",
     "hono": "^4.13.8",

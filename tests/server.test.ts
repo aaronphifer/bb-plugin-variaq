@@ -22,6 +22,7 @@ const VARIAQ_PROJECT = process.env.VARIAQ_TEST_PROJECT ?? "";
 const VARIAQ_PYTHON = process.env.VARIAQ_TEST_PYTHON ??
   (VARIAQ_PROJECT === "" ? "" : join(VARIAQ_PROJECT, ".venv", "bin", "python"));
 const HAS_REAL_VARIAQ = VARIAQ_PROJECT !== "" && VARIAQ_PYTHON !== "";
+const VARIAQ_VERSION = process.env.VARIAQ_TEST_VERSION ?? "0.6.0";
 const RUN_CUDAQ = process.env.VARIAQ_TEST_CUDAQ === "1";
 const describeReal = describe.skipIf(!HAS_REAL_VARIAQ);
 
@@ -63,7 +64,7 @@ describeReal("plugin registration", () => {
     const h = await setupHost();
     const version = await cli(h, ["version"]);
     expect(version.exitCode).toBe(0);
-    expect(version.stdout).toContain("variaq 0.6.0");
+    expect(version.stdout).toContain(`variaq ${VARIAQ_VERSION}`);
   });
 });
 
@@ -73,7 +74,7 @@ describeReal("status/version", () => {
     const result = await tool(h, "variaq_status", {});
     const s = JSON.parse(String(result));
     expect(s.variaq.installed).toBe(true);
-    expect(s.variaq.version).toBe("0.6.0");
+    expect(s.variaq.version).toBe(VARIAQ_VERSION);
     expect(s.variaq.schema_version).toBe("1");
     expect(s.variaq.python).toBe(VARIAQ_PYTHON);
     expect(s.solvers.exact).toBe("available");
@@ -388,11 +389,12 @@ describeReal("campaign, analysis, and report integration", () => {
       scaling_x: "problem_size",
       include_failed: true,
       include_unavailable: true,
+      compare: "classical_vs_quantum",
     })));
     expect(analysis.analysis.source_run_ids).toEqual(expect.arrayContaining(run.summary.run_ids));
     expect(analysis.analysis.groups.length).toBeGreaterThan(0);
     expect(analysis.analysis.scaling_points.length).toBeGreaterThan(0);
-    expect(analysis.analysis.groups[0].environment_versions.variaq).toContain("0.6.0");
+    expect(analysis.analysis.groups[0].environment_versions.variaq).toContain(VARIAQ_VERSION);
 
     const report = JSON.parse(String(await tool(h, "variaq_report_campaign", {
       campaignId: run.campaignId,
@@ -400,6 +402,7 @@ describeReal("campaign, analysis, and report integration", () => {
       formats: ["json", "csv", "markdown"],
       groupBy: ["solver"],
       scalingX: "problem_size",
+      compare: "classical_vs_quantum",
     })));
     expect(report.reportId).toMatch(/^report-/);
     expect(report.paths.csv.groups).toBeTruthy();
@@ -409,9 +412,70 @@ describeReal("campaign, analysis, and report integration", () => {
     expect(reportDocument.campaign_id).toBe(run.campaignId);
     expect(reportDocument.source_run_ids).toEqual(expect.arrayContaining(run.summary.run_ids));
     expect(reportDocument.report_format_version).toBe("1");
-    expect(reportDocument.variaq_version).toBe("0.6.0");
+    expect(reportDocument.variaq_version).toBe(VARIAQ_VERSION);
     expect(reportDocument.generated_at).toBeTruthy();
     expect(reportDocument.analysis.query.campaign_id).toBe(run.campaignId);
+  });
+});
+
+describe.skipIf(!HAS_REAL_VARIAQ || !["0.8.0", "0.8.0rc1"].includes(VARIAQ_VERSION))("paired-solver candidate integration", () => {
+  it("forwards controls, paired/null/timing evidence and expanded reports through existing tools and CLI", async () => {
+    const h = await setupHost();
+    const parameters = { p: 1, optimizer_trials: 2, shots: 32, warmup: false, candidate_parameters: [[0.5, 0.25], [0.8, 0.4]] };
+    const definition = {
+      campaign_format_version: "1", name: "candidate-paired", family: "maxcut",
+      problem_sizes: [4], problem_seeds: [11], solvers: ["exact", "heuristic", "qaoa"],
+      repeats: 2, base_seed: 42, generator_parameters: { edge_probability: 0.7 },
+      solver_config: { qaoa: { parameters } },
+    };
+    const plan = JSON.parse(String(await tool(h, "variaq_campaign_plan", definition)));
+    expect(plan.plan.requested_runs).toBe(6);
+    const run = JSON.parse(String(await tool(h, "variaq_campaign_run", { ...definition, maxRuns: 6 })));
+    expect(run.exitCode).toBe(0);
+    expect(run.summary.status_summary.success).toBe(6);
+    const analysis = JSON.parse(String(await tool(h, "variaq_analyze_campaign", {
+      campaignId: run.campaignId, compare: "paired_solvers",
+    })));
+    const instance = analysis.analysis.instances[0];
+    expect(instance.reference_optimum).toBe(4);
+    expect(instance.runs).toHaveLength(6);
+    const exact = instance.runs.find((r: { solver: string }) => r.solver === "exact");
+    expect(exact.optimality_gap).toBe(0);
+    expect(exact.timing.first_backend_evaluation_seconds).toBeNull();
+    expect(exact.missing_measurements.first_backend_evaluation_seconds).toBeTruthy();
+    const qaoa = instance.runs.find((r: { solver: string }) => r.solver === "qaoa");
+    expect(qaoa.parameters.candidate_parameters).toEqual(parameters.candidate_parameters);
+    expect(qaoa.precision).toBe("fp64");
+    expect(qaoa.cold_start_verified).toBeNull();
+    expect(qaoa.timing.first_backend_evaluation_seconds).toBeGreaterThanOrEqual(0);
+    expect(qaoa.timing_scopes.first_backend_evaluation_overlaps).toBeTruthy();
+    const paired = analysis.analysis.comparisons.find((c: { comparison_type: string }) => c.comparison_type === "paired_solvers");
+    expect(paired.pairs.length).toBeGreaterThanOrEqual(2);
+    const cliAnalysis = await cli(h, ["analyze-campaign", run.campaignId, "--compare", "paired_solvers", "--json"]);
+    expect(cliAnalysis.exitCode, cliAnalysis.stderr).toBe(0);
+    expect(JSON.parse(cliAnalysis.stdout).analysis.source_run_ids).toEqual(expect.arrayContaining(run.summary.run_ids));
+    const runsAnalysis = JSON.parse(String(await tool(h, "variaq_analyze_runs", { run_ids: run.summary.run_ids })));
+    expect(runsAnalysis.analysis.source_run_ids).toEqual(expect.arrayContaining(run.summary.run_ids));
+    const report = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId, outputDir: "paired", formats: ["json", "csv", "markdown"], compare: "paired_solvers",
+    })));
+    expect(report.reportId).toMatch(/^report-/);
+    const document = JSON.parse(readFileSync(report.paths.json, "utf8"));
+    expect(document.analysis.instances).toEqual(analysis.analysis.instances);
+    expect(document.source_run_ids).toEqual(expect.arrayContaining(run.summary.run_ids));
+    for (const name of ["runs", "pairs", "repeats"]) {
+      expect(readFileSync(report.paths.csv[name], "utf8").length).toBeGreaterThan(0);
+    }
+    const runCsv = readFileSync(report.paths.csv.runs, "utf8");
+    expect(runCsv).toContain("timing.first_backend_evaluation_seconds");
+    expect(runCsv).toContain("precision");
+    for (const id of run.summary.run_ids) expect(runCsv).toContain(id);
+    expect(readFileSync(report.paths.markdown, "utf8")).toContain("Paired solver observations");
+    const cliReport = await cli(h, ["report-campaign", run.campaignId, "--output-dir", "paired-cli", "--formats", "json,csv,markdown", "--compare", "paired_solvers", "--json"]);
+    expect(cliReport.exitCode, cliReport.stderr).toBe(0);
+    expect(JSON.parse(cliReport.stdout).paths.csv.pairs).toBeTruthy();
+    const stored = JSON.parse(String(await tool(h, "variaq_runs_list", { limit: 20 })));
+    expect(stored.runs).toHaveLength(6); // Read-only analysis/reporting did not execute solvers.
   });
 });
 
@@ -524,7 +588,7 @@ describe.skipIf(!HAS_REAL_VARIAQ || !RUN_CUDAQ)("optional CUDA-Q CPU integration
   });
 });
 
-describe.skipIf(!HAS_REAL_VARIAQ || !RUN_CUDAQ)("optional CUDA-Q GPU integration", () => {
+describe.skipIf(!HAS_REAL_VARIAQ || process.env.VARIAQ_TEST_GPU !== "1")("optional CUDA-Q GPU integration", () => {
   it("runs a bounded nvidia solve when GPU is available", async () => {
     const h = await setupHost();
     const generated = JSON.parse(String(

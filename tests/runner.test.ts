@@ -19,7 +19,7 @@ import {
   runVariaqJson,
   type VariaqSettings,
 } from "../lib/runner.js";
-import { SUPPORTED_SCHEMA_VERSION, validateEnvelope } from "../lib/schema.js";
+import { SUPPORTED_SCHEMA_VERSION, campaignDefinitionSchema, validateEnvelope } from "../lib/schema.js";
 import { join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -339,6 +339,47 @@ describe("VariaQ output contracts", () => {
     expect(checkVariaqVersion("variaq 0.6.0").supported).toBe(true);
     expect(checkVariaqVersion("0.6.7").supported).toBe(true);
     expect(checkVariaqVersion("0.6.0", "1").schemaVersionSupported).toBe(true);
+  });
+
+  it("accepts the explicitly verified candidate without stripping its suffix", () => {
+    const compatibility = checkVariaqVersion("variaq 0.8.0rc1", "1");
+    expect(compatibility.version).toBe("0.8.0rc1");
+    expect(compatibility.supported).toBe(true);
+    expect(compatibility.warning).toBeNull();
+    expect(compatibility.schemaVersionSupported).toBe(true);
+  });
+
+  it.each(["0.8.0rc2", "0.7.0", "0.6.0rc1", "0.8.0rc1junk", "0.6.0.invalid", "noise 0.6.0"])(
+    "does not silently accept an unverified or malformed version: %s", (version) => {
+      expect(checkVariaqVersion(version, "1").supported).toBe(false);
+    },
+  );
+
+  it("accepts stable 0.8 series releases without a warning", () => {
+    const compatibility = checkVariaqVersion("0.8.0", "1");
+    expect(compatibility.supported).toBe(true);
+    expect(compatibility.warning).toBeNull();
+    expect(checkVariaqVersion("variaq 0.8.3").supported).toBe(true);
+    expect(checkVariaqVersion("0.8.0", "1").schemaVersionSupported).toBe(true);
+  });
+
+  it("rejects unverified 0.8 release candidates such as rc2", () => {
+    expect(checkVariaqVersion("0.8.1rc1").supported).toBe(false);
+  });
+
+  it("accepts canonical nested campaign solver parameters without losing controls", () => {
+    const solver_config = { qaoa: { seed: 42, parameters: { p: 1, candidate_parameters: [[0.5, 0.25]], warmup: false } } };
+    const definition = campaignDefinitionSchema.parse({
+      campaign_format_version: "1", name: "controls", family: "maxcut",
+      problem_sizes: [4], problem_seeds: [1], solvers: ["qaoa"], solver_config,
+    });
+    expect(definition.solver_config).toEqual(solver_config);
+  });
+
+  it("preserves additive paired data and null measurement reasons in schema-v1", () => {
+    const data = { instances: [{ runs: [{ precision: "fp64", timing: { warmup_seconds: null }, missing_measurements: { warmup_seconds: "not recorded" } }] }], comparisons: [{ comparison_type: "paired_solvers", pairs: [] }] };
+    const parsed = validateEnvelope(JSON.stringify({ schema_version: "1", command: "analyze runs", status: "success", data }));
+    expect(parsed.data).toEqual(data);
   });
 
   it("rejects the 0.5 series as unsupported", () => {

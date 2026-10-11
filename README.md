@@ -35,10 +35,10 @@ logic — VariaQ remains authoritative for all of these.
 
 ## Prerequisites
 
-- BB 0.43.x with Plugin SDK 0.4.104
+- BB 0.46.x with Plugin SDK 0.6.37
 - Node.js 22.19 or a compatible version supported by BB
 - Linux-native Python 3.12
-- a separate VariaQ 0.6.x installation; 0.6.0 is the verified version
+- a separate VariaQ 0.6.x installation or the local 0.8.0rc1 candidate
 
 Create a VariaQ environment separately from this repository:
 
@@ -179,20 +179,48 @@ prose parsing or run-ID scraping.
 
 ## Version compatibility
 
-The verified combination is:
+The current checkout targets BB 0.46.x / Plugin SDK 0.6.37 and schema version `1`.
+It accepts stable VariaQ 0.6.x and 0.8.x series releases plus the explicitly
+tested `0.8.0rc1` candidate. Real local integration was verified against the
+immutable `v0.6.0` tag and the reviewed v0.8 candidate checkout. Patch
+acceptance within 0.6.x and 0.8.x is a version policy; every patch was not
+independently executed. VariaQ 0.5.x, 0.7.x, 0.9.x, other release candidates
+(including rc2 and later) and future schemas remain unsupported. A suffix is
+never silently stripped from a version. Status/version report unsupported
+environments with a warning; schema parsing still rejects non-v1 output. This
+does not authorize running an unverified version.
 
-```text
-bb-plugin-variaq 0.5.0
-VariaQ           0.6.0
-Plugin SDK       0.4.104
-BB host          0.43.x
-VariaQ schema    1
+The BB engine/SDK pins have moved from BB 0.43 / SDK 0.4.104 to the actual BB
+0.46 host. Old BB 0.43 host compatibility is not claimed. Package identity is
+`0.6.0` (unreleased); this work does not publish a plugin or a VariaQ release.
+
+### Paired-solver analysis in the 0.8 series
+
+On verified VariaQ 0.8.x stable releases and the tested `0.8.0rc1` candidate,
+existing `variaq_analyze_campaign` and `variaq_report_campaign` tools accept
+`compare: "paired_solvers"`; CLI equivalents accept `--compare paired_solvers`.
+This forwards VariaQ's analysis, including instances, pairs, precision,
+repeat/seed controls, null/reason values and timing scopes. Reports forward all
+generated paths, including per-run, pair and repeat CSVs. The plugin computes
+no objectives, gaps, pairing, timings or speedups.
+
+```sh
+bb variaq analyze-campaign CAMPAIGN_ID --compare paired_solvers --json
+bb variaq report-campaign CAMPAIGN_ID --output-dir paired --formats json,csv,markdown --compare paired_solvers --json
 ```
 
-bb-plugin-variaq 0.5.x is verified against VariaQ 0.6.x and schema version `1`.
-Patch releases within the 0.5 plugin series and 0.6 VariaQ series are accepted.
-Other VariaQ series or future schema versions are reported as unsupported with a
-clear compatibility error.
+Canonical campaign overrides use `solver_config: {qaoa: {seed: 42,
+parameters: {p: 1, optimizer_trials: 2, shots: 32, warmup: false,
+candidate_parameters: [[0.5, 0.25], [0.8, 0.4]]}}}`. Scalar controls, scalar
+lists and numeric matrices are validated without recursive agent-tool schemas.
+Legacy flat scalar override shapes remain accepted; VariaQ remains authoritative
+about their interpretation. No backend math or optimizer is duplicated here.
+
+VariaQ's `analyze runs` CLI has no `--compare` contract. Use ordinary run analysis
+for explicit run selections, and a stored campaign for comparisons. Unsupported
+run-comparison requests receive a clear error. Paired campaign/report requests
+on 0.6.x also fail clearly, without fallback or solver execution. Legacy campaign
+comparison modes remain available on both supported versions.
 
 ## CUDA-Q and GPU behavior
 
@@ -271,7 +299,7 @@ Starting with bb-plugin-variaq 0.5.0 and VariaQ 0.6.0:
 
 ## Limitations
 
-- VariaQ 0.6.0 provides local execution only; there is no physical-QPU path.
+- Supported VariaQ versions provide local execution only; there is no physical-QPU path.
 - There is no IBM Runtime/provider integration and no credential handling.
 - Generic CI does not require CUDA-Q, an NVIDIA GPU, a physical QPU, or remote
   services.
@@ -312,22 +340,32 @@ npm pack --dry-run
 ```
 
 Real integration tests use `VARIAQ_TEST_PROJECT` and `VARIAQ_TEST_PYTHON` when
-set. They default to the local development checkout. Optional CUDA-Q CPU tests
-run only with `VARIAQ_TEST_CUDAQ=1`:
+set. With neither set, real tests are skipped. `VARIAQ_TEST_VERSION` is an
+explicit expected version (default `0.6.0` for tagged CI). Use `0.8.0rc1` for
+the candidate. Optional CUDA-Q CPU tests require `VARIAQ_TEST_CUDAQ=1`; GPU
+execution separately requires `VARIAQ_TEST_GPU=1`:
 
 ```bash
 VARIAQ_TEST_PROJECT=/path/to/variaq \
 VARIAQ_TEST_PYTHON=/path/to/variaq/.venv/bin/python \
+VARIAQ_TEST_VERSION=0.8.0rc1 \
 VARIAQ_TEST_CUDAQ=1 \
 npm run test:integration
 ```
 
 The normal GitHub Actions plugin job uses the deterministic fake CLI. A
-separate Linux integration job checks out the immutable VariaQ `v0.6.0` tag,
+separate Linux integration matrix checks out immutable commits for VariaQ `v0.6.0`
+and the reviewed `release/0.8.0rc1` candidate,
 installs `.[quantum]`, exercises local classical/Qiskit workflows, and runs a
 bounded campaign plan/run, analysis, and report-generation smoke. CUDA-Q, GPU,
 and matplotlib verification remain manual or suitable for a future self-hosted
-runner.
+runner. Candidate integration is pinned to VariaQ commit
+`551151a2c2ccfe0301dca1b22fcc8abf5d540f56`; CI asserts the expected version.
+Update this reviewed pin explicitly when the VariaQ candidate changes.
+The existing public-SDK scanner test remains skipped because its string scanner
+reports command strings as imports; typecheck/build and live registration remain
+active checks. Linux local integration is verified; Windows plugin execution is
+not claimed. The fake executable harness currently uses POSIX executable symlinks.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution boundaries and
 [SECURITY.md](SECURITY.md) for the subprocess security model.
