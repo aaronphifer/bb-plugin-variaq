@@ -192,7 +192,7 @@ does not authorize running an unverified version.
 
 The BB engine/SDK pins have moved from BB 0.43 / SDK 0.4.104 to the actual BB
 0.46 host. Old BB 0.43 host compatibility is not claimed. Package identity is
-`0.6.1` (unreleased); this work does not publish a plugin or a VariaQ release.
+`0.6.1`, released 2026-10-13 from the `v0.6.1` tag.
 
 ### Paired-solver analysis in the 0.8 series
 
