@@ -549,14 +549,20 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function opAnalyzeRuns(query: import("./lib/schema.js").AnalyzeQuery) {
     const c = await cfg();
-    const validated = analyzeQuerySchema.parse(query);
-    if (validated.compare !== undefined) {
+    const validated = analyzeQuerySchema.safeParse(query);
+    if (!validated.success) {
+      throw new PluginError(
+        `Invalid analyze-runs input: ${minimizeZodIssue(validated.error)}`,
+        "Run `bb variaq analyze-runs --help` for usage.",
+      );
+    }
+    if (validated.data.compare !== undefined) {
       throw new PluginError(
         "VariaQ analyze runs does not accept comparison selectors.",
         "Use variaq_analyze_campaign or bb variaq analyze-campaign for comparisons, including paired_solvers on VariaQ 0.8.x.",
       );
     }
-    const argv = buildAnalyzeArgv("runs", validated);
+    const argv = buildAnalyzeArgv("runs", validated.data);
     const result = await runVariaqJson(c, argv, { timeoutMs: 60_000 });
     const envelope = requireSuccess(result, ["analyze", "runs"]);
     const { data, warnings } = successData<AnalyzeEnvelopeData>(envelope, "analyze runs");
@@ -565,7 +571,14 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function opAnalyzeCampaign(campaignId: string, query: Omit<import("./lib/schema.js").AnalyzeQuery, "campaign_id">) {
     const c = await cfg();
-    const fullQuery = analyzeQuerySchema.parse({ ...query, campaign_id: campaignId });
+    const validated = analyzeQuerySchema.safeParse({ ...query, campaign_id: campaignId });
+    if (!validated.success) {
+      throw new PluginError(
+        `Invalid analyze-campaign input: ${minimizeZodIssue(validated.error)}`,
+        "Run `bb variaq analyze-campaign --help` for usage.",
+      );
+    }
+    const fullQuery = validated.data;
     await requireComparisonSupport(c, fullQuery.compare);
     const argv = buildAnalyzeArgv("campaign", fullQuery);
     const result = await runVariaqJson(c, argv, { timeoutMs: 60_000 });
@@ -605,8 +618,12 @@ export default async function plugin(bb: BbPluginApi) {
     },
   ) {
     const c = await cfg();
-    if (options.compare !== undefined) comparisonTypeSchema.parse(options.compare);
-    await requireComparisonSupport(c, options.compare);
+    // Validate the comparison selector before any VariaQ invocation: an
+    // invalid value must surface as a structured PluginError because the CLI
+    // wrapper only converts PluginError instances into command results (a raw
+    // ZodError would escape as an unhandled exception).
+    const compare = parseComparisonOption(options.compare);
+    await requireComparisonSupport(c, compare);
     const root = resolveReportOutputDir(c);
     const containedDir = await resolveContainedReportDir(root, options.outputDir);
 
@@ -617,7 +634,7 @@ export default async function plugin(bb: BbPluginApi) {
       for (const key of options.groupBy) argv.push("--group-by", key);
     }
     if (options.scalingX !== undefined) argv.push("--scaling-x", options.scalingX);
-    if (options.compare !== undefined) argv.push("--compare", options.compare);
+    if (compare !== undefined) argv.push("--compare", compare);
     // `--plots` is conveyed only through the canonical formats list.
     if (options.overwrite) argv.push("--overwrite");
 
@@ -846,7 +863,7 @@ export default async function plugin(bb: BbPluginApi) {
               scaling_x: opts.get("scaling-x"),
               include_failed: args.includes("--include-failed"),
               include_unavailable: args.includes("--include-unavailable"),
-              compare: opts.get("compare") as import("./lib/schema.js").AnalyzeQuery["compare"],
+              compare: parseComparisonOption(opts.get("compare")),
             });
           }
           case "analyze-campaign": {
@@ -858,7 +875,7 @@ export default async function plugin(bb: BbPluginApi) {
               scaling_x: opts.get("scaling-x"),
               include_failed: args.includes("--include-failed"),
               include_unavailable: args.includes("--include-unavailable"),
-              compare: opts.get("compare") as import("./lib/schema.js").AnalyzeQuery["compare"],
+              compare: parseComparisonOption(opts.get("compare")),
             });
           }
           case "report-campaign": {
@@ -1312,6 +1329,37 @@ export default async function plugin(bb: BbPluginApi) {
 }
 
 // ------------------------------------------------------------ CLI helpers --
+
+/**
+ * Validate a user-supplied comparison selector from the CLI boundary.
+ *
+ * Invalid values must produce a structured, actionable PluginError: the CLI
+ * wrapper only converts PluginError instances into command results (exit code
+ * + "message / Hint:" stderr), and rethrows everything else — a raw ZodError
+ * from schema.parse() would escape that handler as an unhandled exception.
+ */
+function parseComparisonOption(value: string | undefined): ComparisonType | undefined {
+  if (value === undefined) return undefined;
+  const parsed = comparisonTypeSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new PluginError(
+      `Invalid comparison '${value}'.`,
+      `Valid comparisons: ${comparisonTypeSchema.options.join(", ")}.`,
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * Reduce a ZodError to its first issue as a short "path: message" string for
+ * embedding in a PluginError message.
+ */
+function minimizeZodIssue(error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (issue === undefined) return error.message;
+  const path = issue.path.length > 0 ? `${issue.path.join(".")}: ` : "";
+  return `${path}${issue.message}`;
+}
 
 function readOptions(args: string[]): Map<string, string> {
   const map = new Map<string, string>();

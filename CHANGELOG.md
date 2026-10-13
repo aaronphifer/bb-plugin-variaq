@@ -15,9 +15,12 @@ Unreleased compatibility update.
 - Validate canonical nested campaign solver parameters, including numeric candidate matrices, using non-recursive tool schemas.
 - Keep GPU integration explicitly opt-in with VARIAQ_TEST_GPU=1, independently of CUDA-Q CPU tests.
 - Run hosted legacy and candidate integration against immutable VariaQ commit pins.
-- Document the six development-toolchain audit findings separately from runtime dependencies.
+- Document the development-toolchain audit findings separately from runtime dependencies.
 
 - Fix duplicated plot-format requests in `variaq_report_campaign` when both `formats: ["plots"]` and `plots: true` are supplied; `formats` is now canonical and `plots: true` only ensures "plots" appears once.
+- Convert invalid `--compare` values on `bb variaq report-campaign`, `analyze-runs`, and `analyze-campaign` from an uncaught `ZodError` into structured `PluginError` CLI errors with valid-value hints, preserving valid-comparison behavior and output contracts.
+- Correct the `SECURITY.md` dependency review to the current audit state: the `source-map-js` row is remediated by the 1.2.2 override, five development-only packages remain (three high, two moderate), and advisory lists per package are now complete with production dependencies still clean.
+- Extend regression coverage: operation-level schema violations (e.g. exceeding the group-by limit) surface as structured CLI errors, and the fake VariaQ harness echoes the received `--compare` value into report envelopes/artifacts so tests prove the comparison selector is actually forwarded to the subprocess.
 - Update GitHub Actions to Node 24-native action versions (`actions/checkout@v6`, `actions/setup-node@v7`, `actions/setup-python@v7`) to resolve Node 20 deprecation warnings while preserving existing workflow behavior.
 - Apply a compatible `overrides` remediation for npm audit findings in the `bb-app` development dependency chain; runtime dependencies remain clean.
 
