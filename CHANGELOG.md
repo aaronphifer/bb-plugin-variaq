@@ -2,9 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-## 0.6.0 - Unreleased
+## 0.6.1 - 2026-10-12
 
-Unreleased compatibility update.
+Maintenance release: review-findings fixes and regression coverage; no compatibility or functional changes.
+
+- Convert invalid `--compare` values on `bb variaq report-campaign`, `analyze-runs`, and `analyze-campaign` from an uncaught `ZodError` into structured `PluginError` CLI errors with valid-value hints, preserving valid-comparison behavior and output contracts.
+- Correct the `SECURITY.md` dependency review to the current audit state: the `source-map-js` row is remediated by the 1.2.2 override, five development-only packages remain (three high, two moderate), and advisory lists per package are now complete with production dependencies still clean.
+- Extend regression coverage: operation-level schema violations (e.g. exceeding the group-by limit) surface as structured CLI errors, and the fake VariaQ harness echoes the received `--compare` value into report envelopes/artifacts so tests prove the comparison selector is actually forwarded to the subprocess.
+
+## 0.6.0 - 2026-10-11
+
+Compatibility release for VariaQ 0.8.0 on BB 0.46 / Plugin SDK 0.6.37.
 
 - Accept stable VariaQ 0.8.x series releases and the tested 0.8.0rc1 candidate while retaining 0.6.x and schema-v1 support; paired_solvers comparisons unlock on stable VariaQ 0.8.x.
 - Prepare an immutable stable VariaQ 0.8.0 integration CI leg (pin the stable tag SHA when the VariaQ stable branch is pushed).
@@ -18,9 +26,6 @@ Unreleased compatibility update.
 - Document the development-toolchain audit findings separately from runtime dependencies.
 
 - Fix duplicated plot-format requests in `variaq_report_campaign` when both `formats: ["plots"]` and `plots: true` are supplied; `formats` is now canonical and `plots: true` only ensures "plots" appears once.
-- Convert invalid `--compare` values on `bb variaq report-campaign`, `analyze-runs`, and `analyze-campaign` from an uncaught `ZodError` into structured `PluginError` CLI errors with valid-value hints, preserving valid-comparison behavior and output contracts.
-- Correct the `SECURITY.md` dependency review to the current audit state: the `source-map-js` row is remediated by the 1.2.2 override, five development-only packages remain (three high, two moderate), and advisory lists per package are now complete with production dependencies still clean.
-- Extend regression coverage: operation-level schema violations (e.g. exceeding the group-by limit) surface as structured CLI errors, and the fake VariaQ harness echoes the received `--compare` value into report envelopes/artifacts so tests prove the comparison selector is actually forwarded to the subprocess.
 - Update GitHub Actions to Node 24-native action versions (`actions/checkout@v6`, `actions/setup-node@v7`, `actions/setup-python@v7`) to resolve Node 20 deprecation warnings while preserving existing workflow behavior.
 - Apply a compatible `overrides` remediation for npm audit findings in the `bb-app` development dependency chain; runtime dependencies remain clean.
 
