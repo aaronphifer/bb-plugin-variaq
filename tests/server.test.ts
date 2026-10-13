@@ -569,6 +569,27 @@ describeReal("failure paths", () => {
   });
 });
 
+describeReal("invalid --compare values stay structured CLI errors", () => {
+  it("report-campaign and analyze-campaign reject invalid --compare before invoking VariaQ", async () => {
+    const h = await setupHost();
+    // Validation precedes any VariaQ invocation, so a well-formed but
+    // non-existent campaign id must never reach VariaQ: exit 1 + structured
+    // message, not VariaQ's exit-2 lookup error and not a leaked ZodError.
+    const badReport = await cli(h, [
+      "report-campaign", "campaign-compare-guard", "--output-dir", "compare-guard",
+      "--formats", "json", "--compare", "totally-bogus", "--overwrite", "--json",
+    ]);
+    expect(badReport.exitCode, badReport.stderr).toBe(1);
+    expect(String(badReport.stderr)).toContain("Invalid comparison 'totally-bogus'");
+    expect(String(badReport.stderr)).toContain("Valid comparisons: classical_vs_quantum, qiskit_vs_cudaq, gpu_vs_cpu, paired_solvers");
+    expect(String(badReport.stderr)).not.toMatch(/ZodError/i);
+
+    const badAnalyze = await cli(h, ["analyze-campaign", "campaign-compare-guard", "--compare", "nope", "--json"]);
+    expect(badAnalyze.exitCode, badAnalyze.stderr).toBe(1);
+    expect(String(badAnalyze.stderr)).toContain("Invalid comparison 'nope'");
+  });
+});
+
 describe.skipIf(!HAS_REAL_VARIAQ || !RUN_CUDAQ)("optional CUDA-Q CPU integration", () => {
   it("runs a bounded qpp-cpu solve when CUDA-Q is installed", async () => {
     const h = await setupHost();

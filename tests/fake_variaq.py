@@ -350,6 +350,7 @@ def main(argv):
         formats = ["json"]
         group_by = []
         scaling_x = None
+        compare = None
         plots = False
         overwrite = False
         for i, a in enumerate(args):
@@ -361,6 +362,8 @@ def main(argv):
                 group_by.append(args[i + 1])
             if a == "--scaling-x" and i + 1 < len(args):
                 scaling_x = args[i + 1]
+            if a == "--compare" and i + 1 < len(args):
+                compare = args[i + 1]
             if a == "--plots":
                 plots = True
             if a == "--overwrite":
@@ -410,14 +413,21 @@ def main(argv):
         if "markdown" in formats:
             md_path = os.path.join(output_dir, f"{report_id}.md")
             with open(md_path, "w") as f:
-                f.write(f"# Report {report_id}\n")
+                # "comparison:" echoes the received --compare argv value
+                # (None when the flag was absent) so tests can assert that the
+                # plugin actually forwarded the comparison selector.
+                f.write(f"# Report {report_id}\ncomparison: {compare}\n")
             paths["markdown"] = md_path
         if "plots" in formats:
             plot_path = os.path.join(output_dir, f"{report_id}_plot.png")
             with open(plot_path, "wb") as f:
                 f.write(b"PNG")
             paths["plots"] = {"summary": plot_path}
-        print(json.dumps(envelope("report campaign", "success", {"report_id": report_id, "paths": paths})))
+        print(json.dumps(envelope("report campaign", "success", {
+            "report_id": report_id,
+            "paths": paths,
+            "compare": compare,
+        })))
         return 0
 
     if cmd == "capabilities":

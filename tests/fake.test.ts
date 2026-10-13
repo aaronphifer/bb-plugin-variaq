@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -668,6 +668,96 @@ describe("report campaign", () => {
     expect(cliResult.exitCode).toBe(0);
     expect(cliResult.stdout).toContain("Report: report-");
     expect(cliResult.stdout).toContain("generated files: 4");
+  });
+
+  it("keeps valid, invalid, and omitted --compare values on the structured CLI error path", async () => {
+    const h = await setup();
+    const run = JSON.parse(String(await tool(h, "variaq_campaign_run", {
+      campaign_format_version: "1",
+      name: "compare-guard",
+      family: "maxcut",
+      problem_sizes: [4],
+      problem_seeds: [1],
+      solvers: ["exact"],
+      repeats: 1,
+      base_seed: 42,
+      generator_parameters: {},
+      solver_config: {},
+      maxRuns: 10,
+    })));
+
+    // Omitted: still valid, exit 0 with the human-readable summary.
+    const omitted = await cli(h, [
+      "report-campaign", run.campaignId, "--output-dir", "compare-omitted", "--formats", "json",
+    ]);
+    expect(omitted.exitCode, omitted.stderr).toBe(0);
+    expect(String(omitted.stdout)).toContain("Report: report-");
+
+    // Valid comparison: accepted and actually forwarded to the VariaQ
+    // subprocess. The fake records the received value in the generated
+    // markdown artifact ("comparison: <value>"); the plugin's typed result
+    // intentionally drops extra envelope fields, so read the artifact.
+    const valid = JSON.parse(String(await tool(h, "variaq_report_campaign", {
+      campaignId: run.campaignId,
+      outputDir: "compare-valid-tool",
+      formats: ["json", "markdown"],
+      compare: "classical_vs_quantum",
+    })));
+    expect(valid.reportId).toMatch(/^report-/);
+    expect(readFileSync(valid.paths.markdown, "utf8")).toContain("comparison: classical_vs_quantum");
+
+    // Invalid comparison: structured CLI error, never a leaked ZodError.
+    const invalid = await cli(h, [
+      "report-campaign", run.campaignId, "--output-dir", "compare-invalid",
+      "--formats", "json", "--compare", "totally-bogus", "--overwrite", "--json",
+    ]);
+    expect(invalid.exitCode, invalid.stderr).toBe(1);
+    expect(String(invalid.stderr)).toContain("Invalid comparison 'totally-bogus'");
+    expect(String(invalid.stderr)).toContain("Valid comparisons: classical_vs_quantum, qiskit_vs_cudaq, gpu_vs_cpu, paired_solvers");
+    expect(String(invalid.stderr)).not.toMatch(/ZodError/i);
+  });
+
+  it("rejects an invalid --compare on analyze commands as a structured CLI error", async () => {
+    const h = await setup();
+    // Validation precedes any VariaQ invocation, so a non-existent campaign id
+    // must fail with the plugin's structured comparison error, not VariaQ's
+    // exit-2 lookup failure and not a leaked ZodError.
+    const badRuns = await cli(h, ["analyze-runs", "--run-id", "run-1", "--compare", "nope", "--json"]);
+    expect(badRuns.exitCode, badRuns.stderr).toBe(1);
+    expect(String(badRuns.stderr)).toContain("Invalid comparison 'nope'");
+    expect(String(badRuns.stderr)).toContain("Valid comparisons:");
+    expect(String(badRuns.stderr)).not.toMatch(/ZodError/i);
+
+    const badCampaign = await cli(h, ["analyze-campaign", "campaign-missing", "--compare", "nope", "--json"]);
+    expect(badCampaign.exitCode, badCampaign.stderr).toBe(1);
+    expect(String(badCampaign.stderr)).toContain("Invalid comparison 'nope'");
+  });
+
+  it("surfaces operation-level schema errors over the CLI as structured errors", async () => {
+    const h = await setup();
+    // Nine --group-by values pass the comparison parser but violate
+    // analyzeQuerySchema's group_by max(8) inside the operation, exercising
+    // the safeParse -> structured PluginError conversion there.
+    const groupBy = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+    const badRuns = await cli(h, [
+      "analyze-runs", "--run-id", "run-1",
+      ...groupBy.flatMap((key) => ["--group-by", key]),
+      "--json",
+    ]);
+    expect(badRuns.exitCode, badRuns.stderr).toBe(1);
+    expect(String(badRuns.stderr)).toContain("Invalid analyze-runs input: group_by: ");
+    expect(String(badRuns.stderr)).toContain("Hint:");
+    expect(String(badRuns.stderr)).not.toMatch(/ZodError/i);
+
+    const badCampaign = await cli(h, [
+      "analyze-campaign", "campaign-schema-guard",
+      ...groupBy.flatMap((key) => ["--group-by", key]),
+      "--json",
+    ]);
+    expect(badCampaign.exitCode, badCampaign.stderr).toBe(1);
+    expect(String(badCampaign.stderr)).toContain("Invalid analyze-campaign input: group_by: ");
+    expect(String(badCampaign.stderr)).toContain("Hint:");
+    expect(String(badCampaign.stderr)).not.toMatch(/ZodError/i);
   });
 });
 
