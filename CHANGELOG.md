@@ -2,9 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## 0.6.1 - 2026-10-12
+## 0.6.1 - Unreleased
 
-Maintenance release: review-findings fixes and regression coverage; no compatibility or functional changes.
+Maintenance release: review-findings fixes and regression coverage; no compatibility or functional changes. The release date is applied to this entry at publication.
 
 - Convert invalid `--compare` values on `bb variaq report-campaign`, `analyze-runs`, and `analyze-campaign` from an uncaught `ZodError` into structured `PluginError` CLI errors with valid-value hints, preserving valid-comparison behavior and output contracts.
 - Correct the `SECURITY.md` dependency review to the current audit state: the `source-map-js` row is remediated by the 1.2.2 override, five development-only packages remain (three high, two moderate), and advisory lists per package are now complete with production dependencies still clean.
